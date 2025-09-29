@@ -1,22 +1,25 @@
 # --- Core UI ---
 gradio>=4.24,<5
 pandas>=2.2,<3
-numpy>=1.26,<3
-folium>=0.16
-branca>=0.7
+numpy>=1.26,<2        # keep <2 for broad geo-stack compat
 
-# --- Geospatial core (raster + CRS + geometry) ---
-rasterio>=1.3.9,<1.4
-pyproj>=3.6
-shapely>=2.0
+# --- Mapping / display ---
+folium>=0.16,<0.17
+branca>=0.7,<0.8
+
+# --- Geospatial core ---
+rasterio>=1.3.9,<1.4  # manylinux wheels; good with numpy<2
+pyproj>=3.6,<4
+shapely>=2,<3
 
 # --- Algorithms for connectivity ---
-scipy>=1.11
-scikit-image>=0.23   # route_through_array for least-cost paths
-networkx>=3.3        # graph ops (corridors, node graphs)
+scipy>=1.11,<2
+scikit-image>=0.23,<0.24   # route_through_array for least-cost paths
+networkx>=3.2,<4
 
-# --- Optional speedups (safe to remove if you want a leaner build) ---
+# --- LLM backends (as in llm_utils.py) ---
+huggingface_hub>=0.22,<0.27
+together>=1.2,<2
+
+# --- Optional speedups (uncomment if desired) ---
 # numba>=0.59
-
-# --- LLM agent (use if your llm_utils calls OpenAI; otherwise remove) ---
-# openai>=1.40
