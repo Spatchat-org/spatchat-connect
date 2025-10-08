@@ -1,4 +1,4 @@
-# factorial_lcp.py
+# flcp.py
 
 """
 Factorial (all unordered pairs) Least-Cost Paths — STREAMING & RAM-SAFE
@@ -23,7 +23,7 @@ also collect features in RAM (not recommended for large N).
 
 Example
 -------
-from methods.factorial_lcp import compute_all_pairs_lcps
+from methods.flcp import compute_all_pairs_lcps
 res = compute_all_pairs_lcps(
     cost_tif="uploads/cost.tif",
     nodes_df=nodes_df,  # columns: node_id, longitude, latitude (WGS84 default)
@@ -61,7 +61,7 @@ except Exception:  # optional; only needed if you enable simplification
 # ----------------------------- Data classes ---------------------------------
 
 @dataclass
-class FactorialLCPParams:
+class FLCPParams:
     id_col: str = "node_id"
     lon_col: str = "longitude"
     lat_col: str = "latitude"
@@ -576,4 +576,4 @@ def compute_all_pairs_lcps(
     return result
 
 
-__all__ = ["FactorialLCPParams", "compute_all_pairs_lcps"]
+__all__ = ["FLCPParams", "compute_all_pairs_lcps"]
