@@ -269,7 +269,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                 label="SpatChat",
                 show_label=True,
                 type="messages",
-                value=[{"role": "assistant", "content": "Welcome! Upload a raster (GeoTIFF) to begin. Optionally add a nodes CSV with longitude/latitude."}]
+                value=[{"role": "assistant", "content": "Welcome! Upload a raster (GeoTIFF) to begin. Optionally add a nodes CSV with longitude/latitude."}],
                 height=400
             )
             user_input = gr.Textbox(
