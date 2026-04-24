@@ -1,5 +1,5 @@
 ---
-title: Spatchat Move
+title: Spatchat Connect
 emoji: ⚡
 colorFrom: yellow
 colorTo: red
