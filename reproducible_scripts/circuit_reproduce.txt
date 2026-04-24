@@ -1,0 +1,188 @@
+# Standalone reproducibility script for SpatChat circuit outputs
+# Install requirements first:
+#   pip install pandas numpy rasterio pyproj scipy
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - NODES_CSV: defaults to bundled nodes.csv or repro_config.json nodes_csv.
+# - COST_TIF: defaults to bundled analysis_cost_tif/input_raster from repro_config.json.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - LON_COL / LAT_COL: node coordinate column names from repro_config.json.
+# - PARAMS: optional circuit settings can be edited in CircuitTheoryParams defaults.
+
+import json
+import math
+import os
+from dataclasses import dataclass
+from itertools import combinations
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import rasterio
+from pyproj import CRS, Transformer
+from rasterio.windows import Window
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+from scipy.sparse.linalg import splu
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs", "circuit")
+
+
+@dataclass
+class CircuitTheoryParams:
+    id_col: str = "node_id"
+    lon_col: str = "longitude"
+    lat_col: str = "latitude"
+    nodes_crs: Optional[str] = "EPSG:4326"
+    fully_connected: bool = True
+    barrier_cost: float = 1e12
+    crop_margin: int = 128
+    min_conductance: float = 1e-9
+    write_current_density: bool = True
+
+
+def _xy_to_rc(transform, x, y):
+    col, row = (~transform) * (x, y)
+    return int(math.floor(row + 0.5)), int(math.floor(col + 0.5))
+
+
+def _estimate_pixel_size(transform):
+    sx = math.hypot(transform.a, transform.b)
+    sy = math.hypot(transform.d, transform.e)
+    return float((sx + sy) / 2.0) if sx and sy else float(sx or sy)
+
+
+def _prepare_window(points, shape, margin):
+    rows = [r for r, _ in points]
+    cols = [c for _, c in points]
+    return Window.from_slices((max(0, min(rows) - margin), min(shape[0], max(rows) + margin + 1)), (max(0, min(cols) - margin), min(shape[1], max(cols) + margin + 1)))
+
+
+def _build_laplacian(cost, valid, fully_connected, px, min_cond):
+    coords = np.argwhere(valid)
+    idx = {(int(r), int(c)): i for i, (r, c) in enumerate(coords)}
+    n = len(coords)
+    rows, cols, data = [], [], []
+    diag = np.zeros(n, dtype=np.float64)
+    offsets = [(1, 0, px), (0, 1, px)]
+    if fully_connected:
+        d = px * math.sqrt(2.0)
+        offsets += [(1, 1, d), (1, -1, d)]
+    for (r, c), i in idx.items():
+        for dr, dc, step in offsets:
+            nr, nc = r + dr, c + dc
+            if (nr, nc) not in idx:
+                continue
+            j = idx[(nr, nc)]
+            denom = (float(cost[r, c]) + float(cost[nr, nc])) * float(step)
+            if denom <= 0 or not np.isfinite(denom):
+                continue
+            g = max(2.0 / denom, min_cond)
+            rows += [i, j]
+            cols += [j, i]
+            data += [-g, -g]
+            diag[i] += g
+            diag[j] += g
+    rows += list(range(n))
+    cols += list(range(n))
+    data += diag.tolist()
+    return coo_matrix((data, (rows, cols)), shape=(n, n)).tocsc(), idx
+
+
+def compute_effective_resistances(cost_tif, nodes_df, params, outdir):
+    with rasterio.open(cost_tif) as ds:
+        tr, crs, shape, profile = ds.transform, ds.crs, (ds.height, ds.width), ds.profile.copy()
+        if params.nodes_crs and crs and CRS.from_user_input(params.nodes_crs) != CRS.from_user_input(crs):
+            to_raster = Transformer.from_crs(params.nodes_crs, crs, always_xy=True)
+        else:
+            to_raster = None
+        node_rcs, unplaced = [], []
+        for _, row in nodes_df.iterrows():
+            nid = str(row[params.id_col])
+            x, y = float(row[params.lon_col]), float(row[params.lat_col])
+            if to_raster is not None:
+                x, y = to_raster.transform(x, y)
+            r, c = _xy_to_rc(tr, x, y)
+            if 0 <= r < shape[0] and 0 <= c < shape[1]:
+                node_rcs.append((nid, r, c))
+            else:
+                unplaced.append({"node_id": nid, "reason": "outside_raster"})
+        if len(node_rcs) < 2:
+            raise ValueError("Need at least two nodes within raster extent")
+        win = _prepare_window([(r, c) for _, r, c in node_rcs], shape, params.crop_margin)
+        arr = np.array(ds.read(1, window=win, masked=True).filled(np.nan), dtype=np.float64)
+        win_tr = ds.window_transform(win)
+    valid = np.isfinite(arr) & (arr < params.barrier_cost)
+    lap, idx = _build_laplacian(arr, valid, params.fully_connected, _estimate_pixel_size(tr), params.min_conductance)
+    row_off, col_off = int(win.row_off), int(win.col_off)
+    placed = []
+    for nid, gr, gc in node_rcs:
+        lr, lc = gr - row_off, gc - col_off
+        if 0 <= lr < arr.shape[0] and 0 <= lc < arr.shape[1] and valid[lr, lc]:
+            placed.append({"node_id": nid, "index": idx[(int(lr), int(lc))]})
+        else:
+            unplaced.append({"node_id": nid, "reason": "invalid_or_barrier"})
+    if len(placed) < 2:
+        raise ValueError("Need at least two nodes on traversable cells")
+    _, labels = connected_components(lap, directed=False, return_labels=True)
+    pairs, disconnected = [], []
+    current = np.zeros(arr.shape, dtype=np.float64) if params.write_current_density else None
+    by_comp = {}
+    for p in placed:
+        by_comp.setdefault(int(labels[int(p["index"])]), []).append(p)
+    for comp, nodes in by_comp.items():
+        if len(nodes) < 2:
+            continue
+        mask = labels == comp
+        kept = np.flatnonzero(mask)
+        remap = {int(old): int(new) for new, old in enumerate(kept)}
+        sub = lap[mask][:, mask].tocsc()
+        red_mask = np.ones(sub.shape[0], dtype=bool)
+        red_mask[0] = False
+        solver = splu(sub[red_mask][:, red_mask])
+        for a, b in combinations(nodes, 2):
+            ai, bi = remap[int(a["index"])], remap[int(b["index"])]
+            rhs = np.zeros(sub.shape[0], dtype=np.float64)
+            rhs[ai], rhs[bi] = 1.0, -1.0
+            pot = np.zeros(sub.shape[0], dtype=np.float64)
+            pot[red_mask] = solver.solve(rhs[red_mask])
+            pairs.append({"source": a["node_id"], "target": b["node_id"], "effective_resistance": float(pot[ai] - pot[bi])})
+            if current is not None:
+                current += np.abs(pot).mean() / max(sub.shape[0], 1)
+    comps = sorted(by_comp.items(), key=lambda x: x[0])
+    for i, (_, left) in enumerate(comps):
+        for _, right in comps[i + 1 :]:
+            for a in left:
+                for b in right:
+                    disconnected.append({"source": a["node_id"], "target": b["node_id"], "reason": "disconnected_components"})
+    os.makedirs(outdir, exist_ok=True)
+    pairs_df = pd.DataFrame(pairs)
+    unplaced_df = pd.DataFrame(unplaced)
+    disc_df = pd.DataFrame(disconnected)
+    pairs_df.to_csv(os.path.join(outdir, "circuit_pairs.csv"), index=False)
+    if not unplaced_df.empty:
+        unplaced_df.to_csv(os.path.join(outdir, "circuit_unplaced_nodes.csv"), index=False)
+    if not disc_df.empty:
+        disc_df.to_csv(os.path.join(outdir, "circuit_disconnected_pairs.csv"), index=False)
+    if current is not None:
+        out_tif = os.path.join(outdir, "circuit_current_density.tif")
+        profile.update(driver="GTiff", height=int(current.shape[0]), width=int(current.shape[1]), count=1, dtype="float32", transform=win_tr, nodata=0.0, compress="LZW")
+        with rasterio.open(out_tif, "w", **profile) as dst:
+            dst.write(current.astype(np.float32), 1)
+    return {"pairs": pairs_df}
+
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    CONFIG = json.load(f)
+NODES_CSV = os.path.join(SCRIPT_DIR, CONFIG.get("nodes_csv") or "nodes.csv")
+COST_TIF = os.path.join(SCRIPT_DIR, CONFIG.get("analysis_cost_tif") or CONFIG.get("input_raster") or "input_raster.tif")
+LON_COL = CONFIG.get("nodes_lon_col") or "longitude"
+LAT_COL = CONFIG.get("nodes_lat_col") or "latitude"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+nodes_df = pd.read_csv(NODES_CSV)
+result = compute_effective_resistances(COST_TIF, nodes_df, CircuitTheoryParams(id_col="node_id", lon_col=LON_COL, lat_col=LAT_COL), OUTPUT_DIR)
+print(f"Circuit outputs reproduced in: {OUTPUT_DIR}")
+print(f"Pair count: {len(result.get('pairs', []))}")

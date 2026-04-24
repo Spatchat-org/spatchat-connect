@@ -1,0 +1,141 @@
+# Standalone reproducibility script for SpatChat CRK outputs
+# Install requirements first:
+#   pip install pandas numpy rasterio pyproj scikit-image
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - NODES_CSV: defaults to bundled nodes.csv or repro_config.json nodes_csv.
+# - COST_TIF: defaults to bundled analysis_cost_tif/input_raster from repro_config.json.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - DISPERSAL_DISTANCE_M / KERNEL_SIGMA_M: CRK settings from repro_config.json crk.
+# - LON_COL / LAT_COL: node coordinate column names from repro_config.json.
+
+import json
+import math
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import rasterio
+from pyproj import CRS, Transformer
+from skimage.graph import MCP, MCP_Geometric
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs", "crk")
+
+
+@dataclass
+class CRKParams:
+    id_col: str = "node_id"
+    lon_col: str = "longitude"
+    lat_col: str = "latitude"
+    nodes_crs: Optional[str] = "EPSG:4326"
+    fully_connected: bool = True
+    geometric: bool = True
+    barrier_cost: float = 1e12
+    use_float32: bool = True
+    kernel: str = "gaussian"
+    cutoff: Optional[float] = None
+    normalize: bool = False
+
+
+def _xy_to_rc_round(transform, x, y):
+    col, row = (~transform) * (x, y)
+    return int(math.floor(row + 0.5)), int(math.floor(col + 0.5))
+
+
+def _estimate_pixel_size(transform):
+    sx = math.hypot(transform.a, transform.b)
+    sy = math.hypot(transform.d, transform.e)
+    return float((sx + sy) / 2.0) if sx and sy else float(sx or sy)
+
+
+def _kernel_from_costs(costs, sigma, kernel, cutoff):
+    costs = np.asarray(costs, dtype=np.float64)
+    out = np.zeros_like(costs, dtype=np.float64)
+    mask = np.isfinite(costs)
+    if not np.any(mask):
+        return out
+    valid = costs[mask]
+    if kernel == "gaussian":
+        w = np.exp(-0.5 * (valid / sigma) ** 2)
+        if cutoff is not None:
+            w = np.where(valid <= cutoff, w, 0.0)
+    else:
+        bw = cutoff if cutoff is not None else sigma
+        w = np.zeros_like(valid)
+        inner = valid <= bw
+        w[inner] = np.maximum(1.0 - (valid[inner] ** 2) / (bw ** 2), 0.0)
+    out[mask] = w
+    return out
+
+
+def compute_cumulative_resistant_kernel(cost_tif, nodes_df, bandwidth_meters, params, out_tif):
+    with rasterio.open(cost_tif) as ds:
+        arr = ds.read(1, masked=True).astype(np.float32 if params.use_float32 else np.float64, copy=False)
+        arr = np.array(arr.filled(np.nan), dtype=np.float64)
+        traversable = np.isfinite(arr)
+        arr = np.where(traversable, arr, float(params.barrier_cost))
+        tr = ds.transform
+        crs = ds.crs
+        H, W = ds.height, ds.width
+        if params.nodes_crs and crs and CRS.from_user_input(params.nodes_crs) != CRS.from_user_input(crs):
+            to_raster = Transformer.from_crs(params.nodes_crs, crs, always_xy=True)
+        else:
+            to_raster = None
+        sources, skipped = [], []
+        for _, row in nodes_df.iterrows():
+            nid = str(row[params.id_col])
+            x, y = float(row[params.lon_col]), float(row[params.lat_col])
+            if to_raster is not None:
+                x, y = to_raster.transform(x, y)
+            r, c = _xy_to_rc_round(tr, x, y)
+            if 0 <= r < H and 0 <= c < W and traversable[r, c]:
+                sources.append((r, c))
+            else:
+                skipped.append(nid)
+        if not sources:
+            raise ValueError("No valid nodes in raster")
+        from collections import Counter
+        src_counts = Counter(sources)
+        surface = np.zeros((H, W), dtype=np.float64)
+        solver_cls = MCP_Geometric if params.geometric else MCP
+        for rc, n in src_counts.items():
+            solver = solver_cls(arr, fully_connected=params.fully_connected)
+            costs, _ = solver.find_costs(starts=[rc], ends=None, max_cost=params.cutoff)
+            surface += _kernel_from_costs(costs, float(bandwidth_meters), params.kernel, params.cutoff) * float(n)
+        if params.normalize:
+            surface /= float(sum(src_counts.values()))
+        out = surface.astype(np.float32 if params.use_float32 else np.float64, copy=False)
+        profile = ds.profile.copy()
+        profile.update(dtype="float32" if params.use_float32 else "float64", count=1, nodata=None)
+        with rasterio.open(out_tif, "w", **profile) as dst:
+            dst.write(out.astype(profile["dtype"]), 1)
+    return {"sources_used": int(sum(src_counts.values())), "surface_path": out_tif, "pixel_size": _estimate_pixel_size(tr), "sources_skipped": skipped}
+
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    CONFIG = json.load(f)
+
+NODES_CSV = os.path.join(SCRIPT_DIR, CONFIG.get("nodes_csv") or "nodes.csv")
+COST_TIF = os.path.join(SCRIPT_DIR, CONFIG.get("analysis_cost_tif") or CONFIG.get("input_raster") or "input_raster.tif")
+LON_COL = CONFIG.get("nodes_lon_col") or "longitude"
+LAT_COL = CONFIG.get("nodes_lat_col") or "latitude"
+CRK = CONFIG.get("crk") or {}
+DISPERSAL_DISTANCE_M = float(CRK.get("dispersal_distance_m") or CRK.get("cutoff_m") or 1000.0)
+KERNEL_SIGMA_M = float(CRK.get("kernel_sigma_m") or max(DISPERSAL_DISTANCE_M / 3.0, 1.0))
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+nodes_df = pd.read_csv(NODES_CSV)
+result = compute_cumulative_resistant_kernel(
+    cost_tif=COST_TIF,
+    nodes_df=nodes_df,
+    bandwidth_meters=KERNEL_SIGMA_M,
+    params=CRKParams(id_col="node_id", lon_col=LON_COL, lat_col=LAT_COL, cutoff=DISPERSAL_DISTANCE_M),
+    out_tif=os.path.join(OUTPUT_DIR, "cumulative_resistant_kernel.tif"),
+)
+print(f"CRK output reproduced in: {OUTPUT_DIR}")
+print(f"Sources used: {result.get('sources_used')}")

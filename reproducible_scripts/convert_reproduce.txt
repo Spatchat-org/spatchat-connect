@@ -1,0 +1,159 @@
+# Standalone reproducibility script for SpatChat surface conversion outputs
+# Install requirements first:
+#   pip install numpy rasterio
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - INPUT_RASTER: defaults to bundled input_raster.tif or repro_config.json input_raster.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - SOURCE_TYPE: defaults to repro_config.json surface_type (fallback: resistance).
+# - TARGET_TYPE: defaults to repro_config.json conversion.target (fallback: resistance).
+# - SCALE_MODE / SCALE_RANGE: conversion scaling controls from repro_config.json conversion.
+
+import json
+import os
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import numpy as np
+import rasterio
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+
+TYPE_ALIASES = {
+    "suitability": "suitability",
+    "habitat": "suitability",
+    "suit": "suitability",
+    "resistance": "resistance",
+    "cost": "resistance",
+    "friction": "resistance",
+    "conductance": "conductance",
+}
+
+
+@dataclass
+class ConversionOptions:
+    eps: float = 1e-6
+    max_resistance: Optional[float] = None
+    suitability_cap: Optional[float] = 1.0
+
+
+def normalise_type(name: str) -> str:
+    key = name.strip().lower()
+    if key not in TYPE_ALIASES:
+        raise ValueError(f"Unknown surface type '{name}'")
+    return TYPE_ALIASES[key]
+
+
+def _scale_resistance_linear(data: np.ndarray, target_range: Tuple[float, float]) -> np.ndarray:
+    target_min, target_max = target_range
+    out = data.copy()
+    valid = np.isfinite(out) & (out > 0)
+    if not np.any(valid):
+        return out
+    cur_min = float(np.nanmin(out[valid]))
+    cur_max = float(np.nanmax(out[valid]))
+    if cur_max <= cur_min:
+        out[valid] = target_min
+        return out
+    out[valid] = target_min + (out[valid] - cur_min) * ((target_max - target_min) / (cur_max - cur_min))
+    return np.clip(out, target_min, target_max)
+
+
+def _suitability_to_resistance_exponential(suitability: np.ndarray, target_range: Tuple[float, float], eps: float) -> np.ndarray:
+    target_min, target_max = target_range
+    out = np.full_like(suitability, np.nan, dtype=np.float64)
+    valid = np.isfinite(suitability)
+    if not np.any(valid):
+        return out
+    ratio = target_max / target_min
+    clamped = np.clip(suitability[valid], 0.0, 1.0)
+    clamped = np.where(clamped < eps, eps, clamped)
+    out[valid] = target_min * (ratio ** (1.0 - clamped))
+    return np.clip(out, target_min, target_max)
+
+
+def convert_surface(
+    input_path: str,
+    output_path: str,
+    src_type: str,
+    dst_type: str,
+    eps: float = 1e-6,
+    max_resistance: Optional[float] = None,
+    suitability_cap: Optional[float] = 1.0,
+    output_nodata: Optional[float] = None,
+    force_dtype: Optional[str] = "float32",
+    scale_range: Optional[Tuple[float, float]] = None,
+    scale_mode: str = "linear",
+) -> None:
+    src_type = normalise_type(src_type)
+    dst_type = normalise_type(dst_type)
+    mode = (scale_mode or "linear").strip().lower()
+    opts = ConversionOptions(eps=eps, max_resistance=max_resistance, suitability_cap=suitability_cap)
+
+    with rasterio.open(input_path) as src:
+        profile = src.profile
+        nodata_in = src.nodata
+        nodata_out = output_nodata if output_nodata is not None else nodata_in
+        data = src.read(masked=True).astype(np.float64)
+        converted = np.full(data.shape, np.nan, dtype=np.float64)
+        for i in range(src.count):
+            arr = data[i].filled(np.nan)
+            if dst_type == "resistance" and mode == "exponential" and scale_range and src_type == "suitability":
+                out = _suitability_to_resistance_exponential(arr, scale_range, opts.eps)
+            else:
+                if src_type == "resistance":
+                    resistance = arr
+                else:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        resistance = np.divide(1.0, arr, out=np.full_like(arr, np.nan), where=np.abs(arr) > opts.eps)
+                if opts.max_resistance is not None:
+                    resistance = np.where(resistance > opts.max_resistance, opts.max_resistance, resistance)
+                if dst_type == "resistance":
+                    out = resistance
+                else:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        out = np.divide(1.0, resistance, out=np.full_like(resistance, np.nan), where=np.isfinite(resistance))
+                    if dst_type == "suitability":
+                        if opts.suitability_cap is not None:
+                            out = np.where(out > opts.suitability_cap, opts.suitability_cap, out)
+                        out = np.where(out < 0, 0, out)
+            converted[i] = out
+        if dst_type == "resistance" and scale_range is not None and not (mode == "exponential" and src_type == "suitability"):
+            converted = _scale_resistance_linear(converted, scale_range)
+        if nodata_out is None:
+            nodata_out = np.nan
+        out_dtype = force_dtype if force_dtype in ("float32", "float64") else "float32"
+        profile.update(dtype=out_dtype, nodata=nodata_out)
+        filled = np.where(np.isnan(converted), nodata_out, converted).astype(out_dtype)
+        with rasterio.open(output_path, "w", **profile) as dst:
+            dst.write(filled)
+
+
+CONFIG = {}
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        CONFIG = json.load(f)
+
+SOURCE_TYPE = CONFIG.get("surface_type") or "resistance"
+CONVERSION = CONFIG.get("conversion") or {}
+TARGET_TYPE = CONVERSION.get("target") or "resistance"
+SCALE_MODE = CONVERSION.get("scale_mode") or "linear"
+SCALE_RANGE = CONVERSION.get("range") or [1.0, 100.0]
+INPUT_RASTER = os.path.join(SCRIPT_DIR, CONFIG.get("input_raster") or "input_raster.tif")
+OUTPUT_PATH = os.path.join(OUTPUT_DIR, "converted_surface.tif")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+convert_surface(
+    input_path=INPUT_RASTER,
+    output_path=OUTPUT_PATH,
+    src_type=SOURCE_TYPE,
+    dst_type=TARGET_TYPE,
+    scale_range=tuple(SCALE_RANGE) if TARGET_TYPE == "resistance" and SCALE_RANGE else None,
+    scale_mode=SCALE_MODE,
+)
+
+print(f"Converted surface written to: {OUTPUT_PATH}")

@@ -1,0 +1,153 @@
+# Standalone reproducibility script for SpatChat LCP outputs
+# Install requirements first:
+#   pip install pandas numpy rasterio pyproj scikit-image
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - NODES_CSV: defaults to bundled nodes.csv or repro_config.json nodes_csv.
+# - COST_TIF: defaults to bundled analysis_cost_tif/input_raster from repro_config.json.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - LON_COL / LAT_COL: node coordinate column names from repro_config.json (fallback: longitude/latitude).
+
+import csv
+import json
+import math
+import os
+
+import numpy as np
+import pandas as pd
+import rasterio
+from pyproj import CRS, Geod, Transformer
+from rasterio.transform import rowcol
+from rasterio.windows import Window
+from skimage.graph import MCP, MCP_Geometric
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs", "lcp")
+
+
+def _xy_to_rc(transform, x, y):
+    row, col = rowcol(transform, x, y, op=math.floor)
+    return int(row), int(col)
+
+
+def _rc_to_xy(transform, r, c):
+    x, y = transform * (c + 0.5, r + 0.5)
+    return float(x), float(y)
+
+
+def _estimate_pixel_size(transform):
+    sx = math.hypot(transform.a, transform.b)
+    sy = math.hypot(transform.d, transform.e)
+    return float((sx + sy) / 2.0) if sx and sy else float(sx or sy)
+
+
+def _union_crop_window(points_rc, h, w, margin):
+    r_vals = [p[0] for p in points_rc]
+    c_vals = [p[1] for p in points_rc]
+    return Window.from_slices((max(0, min(r_vals) - margin), min(h, max(r_vals) + margin)), (max(0, min(c_vals) - margin), min(w, max(c_vals) + margin)))
+
+
+def _geodesic_length_m(coords_ll):
+    geod = Geod(ellps="WGS84")
+    length = 0.0
+    for (x0, y0), (x1, y1) in zip(coords_ll[:-1], coords_ll[1:]):
+        _, _, d = geod.inv(x0, y0, x1, y1)
+        length += d
+    return float(length)
+
+
+def compute_all_pairs_lcps(cost_tif, nodes_df, id_col="node_id", lon_col="longitude", lat_col="latitude", nodes_crs="EPSG:4326", outdir=None):
+    with rasterio.open(cost_tif) as ds:
+        H, W, tr, crs = ds.height, ds.width, ds.transform, ds.crs
+        px = _estimate_pixel_size(tr)
+        if nodes_crs and crs and CRS.from_user_input(nodes_crs) != CRS.from_user_input(crs):
+            to_raster = Transformer.from_crs(nodes_crs, crs, always_xy=True)
+        else:
+            to_raster = None
+        ids, rc_lookup = [], {}
+        for _, row in nodes_df.iterrows():
+            nid = str(row[id_col])
+            x, y = float(row[lon_col]), float(row[lat_col])
+            if to_raster is not None:
+                x, y = to_raster.transform(x, y)
+            r, c = _xy_to_rc(tr, x, y)
+            if 0 <= r < H and 0 <= c < W:
+                ids.append(nid)
+                rc_lookup[nid] = (r, c)
+        if len(ids) < 2:
+            raise ValueError("Need at least two valid nodes")
+        os.makedirs(outdir, exist_ok=True)
+        gj = os.path.join(outdir, "lcps_all.geojsonl")
+        idx = os.path.join(outdir, "lcp_index.csv")
+        unr = os.path.join(outdir, "unreachable_pairs.csv")
+        cnt = os.path.join(outdir, "lcp_path_counts.tif")
+        with open(os.path.join(outdir, "nodes_order.csv"), "w", encoding="utf-8") as f:
+            for nid in ids:
+                f.write(f"{nid}\n")
+        total, skipped = 0, 0
+        counts = np.zeros((H, W), dtype=np.uint32)
+        with open(gj, "w", encoding="utf-8") as g_f, open(idx, "w", newline="", encoding="utf-8") as i_f, open(unr, "w", newline="", encoding="utf-8") as u_f:
+            iw, uw = csv.writer(i_f), csv.writer(u_f)
+            iw.writerow(["source", "target", "cost", "length_m", "n_vertices"])
+            uw.writerow(["source", "target", "reason"])
+            for i, src in enumerate(ids):
+                src_rc = rc_lookup[src]
+                tgts = [(ids[j], rc_lookup[ids[j]]) for j in range(i + 1, len(ids))]
+                if not tgts:
+                    continue
+                dmax = 0.0
+                for _, rc in tgts:
+                    dr, dc = abs(rc[0] - src_rc[0]), abs(rc[1] - src_rc[1])
+                    dmax = max(dmax, (dr * dr + dc * dc) ** 0.5)
+                win = _union_crop_window([src_rc] + [rc for _, rc in tgts], H, W, max(256, int(128 + 0.2 * dmax)))
+                arr = np.array(ds.read(1, window=win, masked=True).filled(np.nan), dtype=np.float64)
+                if np.isnan(arr).all():
+                    for dst, _ in tgts:
+                        uw.writerow([src, dst, "no valid cost pixels in window"])
+                    skipped += len(tgts)
+                    continue
+                arr = np.where(np.isfinite(arr), arr, 1e12) * px
+                r_off, c_off = int(win.row_off), int(win.col_off)
+                start = (src_rc[0] - r_off, src_rc[1] - c_off)
+                ends = [(rc[0] - r_off, rc[1] - c_off) for _, rc in tgts]
+                mcp = MCP_Geometric(arr, fully_connected=True)
+                costs, _ = mcp.find_costs(starts=[start], ends=ends)
+                wtr = ds.window_transform(win)
+                conv = (lambda xy: Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform(xy[0], xy[1])) if crs and crs.to_string() != "EPSG:4326" else (lambda xy: xy)
+                for (dst, _), end in zip(tgts, ends):
+                    cval = float(costs[end[0], end[1]])
+                    if not np.isfinite(cval):
+                        uw.writerow([src, dst, "unreachable"])
+                        skipped += 1
+                        continue
+                    try:
+                        path = mcp.traceback(end)
+                    except Exception:
+                        uw.writerow([src, dst, "traceback failure"])
+                        skipped += 1
+                        continue
+                    ll = [conv(_rc_to_xy(wtr, r, c)) for r, c in path]
+                    feat = {"type": "Feature", "properties": {"source": src, "target": dst, "cost": cval, "length_m": _geodesic_length_m(ll), "n_vertices": len(ll)}, "geometry": {"type": "LineString", "coordinates": [(float(x), float(y)) for x, y in ll]}}
+                    g_f.write(json.dumps(feat) + "\n")
+                    iw.writerow([src, dst, cval, feat["properties"]["length_m"], len(ll)])
+                    for r, c in path:
+                        counts[r + r_off, c + c_off] += 1
+                    total += 1
+        with rasterio.open(cnt, "w", driver="GTiff", height=H, width=W, count=1, dtype="uint32", transform=tr, crs=crs, nodata=0, compress="LZW") as dst:
+            dst.write(counts, 1)
+    return {"count": int(total), "skipped_pairs_count": int(skipped)}
+
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    CONFIG = json.load(f)
+NODES_CSV = os.path.join(SCRIPT_DIR, CONFIG.get("nodes_csv") or "nodes.csv")
+COST_TIF = os.path.join(SCRIPT_DIR, CONFIG.get("analysis_cost_tif") or CONFIG.get("input_raster") or "input_raster.tif")
+LON_COL = CONFIG.get("nodes_lon_col") or "longitude"
+LAT_COL = CONFIG.get("nodes_lat_col") or "latitude"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+nodes_df = pd.read_csv(NODES_CSV)
+result = compute_all_pairs_lcps(COST_TIF, nodes_df, id_col="node_id", lon_col=LON_COL, lat_col=LAT_COL, outdir=OUTPUT_DIR)
+print(f"LCP outputs reproduced in: {OUTPUT_DIR}")
+print(f"Pairs solved: {result.get('count')}")

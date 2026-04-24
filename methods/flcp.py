@@ -12,11 +12,12 @@ pairs** of nodes over a cost raster, while keeping memory stable:
 Outputs
 -------
 If `outdir` is provided, the function writes:
-- `lcps_all.geojsonl`       — all paths, one feature per line (WGS84)
-- `lcp_index.csv`           — rows: source,target,cost,length_m,n_vertices
-- `unreachable_pairs.csv`   — rows: source,target,reason
-- `nodes_order.csv`         — the exact node order used (one id per line)
-- optional: `lcps_preview.geojson` (small FeatureCollection sample for UI)
+- `lcps_all.geojsonl`       – all paths, one feature per line (WGS84)
+- `lcp_index.csv`           – rows: source,target,cost,length_m,n_vertices
+- `unreachable_pairs.csv`   – rows: source,target,reason
+- `nodes_order.csv`         – the exact node order used (one id per line)
+- `lcp_path_counts.tif`     – per-pixel path counts
+- `lcp_cost_matrix.csv`     – symmetric cost matrix aligned with node order
 
 By default, **no features are kept in memory**. Set `return_features=True` to
 also collect features in RAM (not recommended for large N).
@@ -29,7 +30,6 @@ res = compute_all_pairs_lcps(
     nodes_df=nodes_df,  # columns: node_id, longitude, latitude (WGS84 default)
     n_jobs=4,
     outdir="outputs",
-    preview_n=1000,
 )
 print(res["count"], "paths →", res.get("geojsonl_path"))
 """
@@ -47,7 +47,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.windows import Window
-from rasterio.transform import Affine
+from rasterio.transform import Affine, rowcol
 from pyproj import Transformer, CRS, Geod
 from skimage.graph import MCP, MCP_Geometric
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -83,13 +83,25 @@ class FLCPParams:
 # ----------------------------- Helpers --------------------------------------
 
 def _xy_to_rc(transform: Affine, x: float, y: float) -> tuple[int, int]:
-    col, row = (~transform) * (x, y)
-    return int(math.floor(row + 0.5)), int(math.floor(col + 0.5))
+    row, col = rowcol(transform, x, y, op=math.floor)
+    return int(row), int(col)
 
 
 def _rc_to_xy(transform: Affine, r: int, c: int) -> tuple[float, float]:
     x, y = transform * (c + 0.5, r + 0.5)
     return float(x), float(y)
+
+
+def _estimate_pixel_size(transform: Affine) -> float:
+    sx = math.hypot(transform.a, transform.b)
+    sy = math.hypot(transform.d, transform.e)
+    if sx == 0 and sy == 0:
+        raise ValueError("Invalid transform; pixel size cannot be zero.")
+    if sx == 0:
+        return float(sy)
+    if sy == 0:
+        return float(sx)
+    return float((sx + sy) / 2.0)
 
 
 def _union_crop_window(points_rc: Sequence[tuple[int, int]], h: int, w: int, margin: int) -> Window:
@@ -131,6 +143,95 @@ def _safe_name(s: str) -> str:
     return out[:64] if len(out) > 64 else out
 
 
+def write_cost_matrix_from_index(index_csv_path: str, nodes_order_path: str, out_csv_path: str) -> str:
+    nodes: list[str] = []
+    with open(nodes_order_path, "r", encoding="utf-8") as f:
+        for line in f:
+            nid = line.strip()
+            if nid:
+                nodes.append(nid)
+    if not nodes:
+        raise ValueError("nodes_order.csv is empty")
+
+    n = len(nodes)
+    idx_lookup = {nid: i for i, nid in enumerate(nodes)}
+    matrix = np.full((n, n), np.nan, dtype=np.float64)
+    np.fill_diagonal(matrix, 0.0)
+
+    with open(index_csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            src = row.get("source")
+            dst = row.get("target")
+            if src not in idx_lookup or dst not in idx_lookup:
+                continue
+            cost_val = float(row.get("cost", "nan"))
+            i = idx_lookup[src]
+            j = idx_lookup[dst]
+            matrix[i, j] = cost_val
+            matrix[j, i] = cost_val
+
+    df = pd.DataFrame(matrix, index=nodes, columns=nodes)
+    df.to_csv(out_csv_path)
+    return out_csv_path
+
+
+def _append_node_coordinates_to_pair_csv(
+    csv_path: Optional[str],
+    nodes_df: pd.DataFrame,
+    *,
+    id_col: str,
+    lon_col: str,
+    lat_col: str,
+) -> None:
+    """Add source/target coordinate columns to pairwise result CSVs."""
+    if not csv_path or not os.path.exists(csv_path):
+        return
+    if nodes_df is None or nodes_df.empty:
+        return
+    required = {id_col, lon_col, lat_col}
+    if not required.issubset(nodes_df.columns):
+        return
+    try:
+        pairs_df = pd.read_csv(csv_path)
+    except Exception:
+        return
+    if pairs_df.empty or "source" not in pairs_df.columns or "target" not in pairs_df.columns:
+        return
+
+    coords_df = (
+        nodes_df[[id_col, lon_col, lat_col]]
+        .copy()
+        .rename(
+            columns={
+                id_col: "node_id",
+                lon_col: "x",
+                lat_col: "y",
+            }
+        )
+    )
+    coords_df["node_id"] = coords_df["node_id"].astype(str)
+
+    source_coords = coords_df.rename(
+        columns={
+            "node_id": "source",
+            "x": "source_x",
+            "y": "source_y",
+        }
+    )
+    target_coords = coords_df.rename(
+        columns={
+            "node_id": "target",
+            "x": "target_x",
+            "y": "target_y",
+        }
+    )
+
+    merged = pairs_df.merge(source_coords, on="source", how="left")
+    merged = merged.merge(target_coords, on="target", how="left")
+    merged.to_csv(csv_path, index=False)
+
+
 # ----------------------------- Worker ---------------------------------------
 
 def _solve_for_source(
@@ -144,6 +245,7 @@ def _solve_for_source(
     crop_min: int,
     fully_connected: bool,
     geometric: bool,
+    pixel_size: float,
     barrier_cost: float,
     use_float32: bool,
     simplify_tol_m: Optional[float],
@@ -151,6 +253,7 @@ def _solve_for_source(
     tmp_geojsonl_dir: Optional[str],
     tmp_index_dir: Optional[str],
     tmp_unreach_dir: Optional[str],
+    tmp_counts_dir: Optional[str],
     return_features: bool,
 ) -> dict:
     features_mem = [] if return_features else None
@@ -161,6 +264,7 @@ def _solve_for_source(
     gjl_path = None
     idx_path = None
     unr_path = None
+    counts_meta: Optional[dict] = None
     gjl_f = idx_f = unr_f = None
 
     try:
@@ -213,9 +317,12 @@ def _solve_for_source(
                     "gjl": gjl_path,
                     "idx": idx_path,
                     "unr": unr_path,
+                    "counts": None,
                     "features": features_mem or [],
                 }
             arr = np.where(np.isnan(arr), np.float32(barrier_cost) if use_float32 else float(barrier_cost), arr)
+            arr = arr * (np.float32(pixel_size) if use_float32 else float(pixel_size))
+            counts_arr = np.zeros(arr.shape, dtype=np.uint32)
 
             # Local coords in window
             r_off, c_off = int(win.row_off), int(win.col_off)
@@ -276,8 +383,7 @@ def _solve_for_source(
                         },
                         "geometry": {"type": "LineString", "coordinates": [(float(x), float(y)) for x, y in coords_out]},
                     }
-                    gjl_f.write(json.dumps(feat) + "
-")
+                    gjl_f.write(json.dumps(feat) + "\n")
 
                 # Stream CSV index
                 if idx_f:
@@ -288,6 +394,21 @@ def _solve_for_source(
                     features_mem.append(feat)
 
                 count += 1
+
+                for r, c in path_rc:
+                    counts_arr[r, c] += 1
+
+        if tmp_counts_dir and counts_arr.any():
+            os.makedirs(tmp_counts_dir, exist_ok=True)
+            counts_path = os.path.join(tmp_counts_dir, f"counts_src_{src_index:06d}.npy")
+            np.save(counts_path, counts_arr)
+            counts_meta = {
+                "path": counts_path,
+                "row_off": r_off,
+                "col_off": c_off,
+                "height": counts_arr.shape[0],
+                "width": counts_arr.shape[1],
+            }
     finally:
         for fh in (gjl_f, idx_f, unr_f):
             try:
@@ -301,6 +422,7 @@ def _solve_for_source(
         "gjl": gjl_path,
         "idx": idx_path,
         "unr": unr_path,
+        "counts": counts_meta,
         "features": features_mem or [],
     }
 
@@ -327,13 +449,12 @@ def compute_all_pairs_lcps(
     max_vertices: Optional[int] = None,
     outdir: Optional[str] = None,
     return_features: bool = False,
-    preview_n: int = 0,
     cleanup_tmp: bool = True,
 ) -> dict:
     """Compute exact least-cost paths for **all unordered pairs (i<j)**, streaming to disk.
 
     Returns dict with keys: count, skipped_pairs_count, params, geojsonl_path, index_csv_path,
-    unreachable_csv_path, nodes_order_path, preview_geojson_path (optional), and optionally
+    unreachable_csv_path, nodes_order_path, path_counts_tif, cost_matrix_path, and optionally
     an in-memory `features` list when `return_features=True`.
     """
     if not os.path.exists(cost_tif):
@@ -349,6 +470,7 @@ def compute_all_pairs_lcps(
         H, W = ds.height, ds.width
         transform = ds.transform
         raster_crs = ds.crs
+        pixel_size = _estimate_pixel_size(transform)
 
     # Prepare transformer for node coords → raster CRS
     if nodes_crs:
@@ -393,14 +515,23 @@ def compute_all_pairs_lcps(
         tmp_geojsonl_dir = os.path.join(outdir, "lcps_tmp")
         tmp_index_dir = os.path.join(outdir, "lcp_index_tmp")
         tmp_unreach_dir = os.path.join(outdir, "unreach_tmp")
+        tmp_counts_dir = os.path.join(outdir, "lcp_counts_tmp")
+        os.makedirs(tmp_counts_dir, exist_ok=True)
+        mmap_path = os.path.join(tmp_counts_dir, "counts_memmap.dat")
+        counts_mem = np.memmap(mmap_path, dtype=np.uint32, mode="w+", shape=(H, W))
+        counts_mem[:] = 0
         final_geojsonl = os.path.join(outdir, "lcps_all.geojsonl")
         final_index_csv = os.path.join(outdir, "lcp_index.csv")
         final_unreach_csv = os.path.join(outdir, "unreachable_pairs.csv")
+        final_count_tif = os.path.join(outdir, "lcp_path_counts.tif")
         nodes_order_csv = os.path.join(outdir, "nodes_order.csv")
-        preview_geojson = os.path.join(outdir, "lcps_preview.geojson") if preview_n and preview_n > 0 else None
+        matrix_csv = None
     else:
-        tmp_geojsonl_dir = tmp_index_dir = tmp_unreach_dir = None
-        final_geojsonl = final_index_csv = final_unreach_csv = nodes_order_csv = preview_geojson = None
+        tmp_geojsonl_dir = tmp_index_dir = tmp_unreach_dir = tmp_counts_dir = None
+        mmap_path = None
+        counts_mem = None
+        final_geojsonl = final_index_csv = final_unreach_csv = final_count_tif = nodes_order_csv = None
+        matrix_csv = None
 
     # Modest cap for Spaces
     if n_jobs is None or n_jobs < 1:
@@ -410,7 +541,7 @@ def compute_all_pairs_lcps(
     # Solve per source (optionally in parallel)
     total_paths = 0
     total_skipped = 0
-    worker_files = []  # list of (src_index, gjl_path, idx_path, unr_path)
+    worker_files: list[dict] = []
 
     if n_jobs > 1 and len(by_src) > 1:
         with ProcessPoolExecutor(max_workers=n_jobs) as ex:
@@ -431,6 +562,7 @@ def compute_all_pairs_lcps(
                     int(crop_min),
                     bool(fully_connected),
                     bool(geometric),
+                    float(pixel_size),
                     float(barrier_cost),
                     bool(use_float32),
                     simplify_tol_m,
@@ -438,6 +570,7 @@ def compute_all_pairs_lcps(
                     tmp_geojsonl_dir,
                     tmp_index_dir,
                     tmp_unreach_dir,
+                    tmp_counts_dir,
                     bool(return_features),
                 )
                 futs.append((src_index, fut))
@@ -445,7 +578,15 @@ def compute_all_pairs_lcps(
                 res = fut.result()
                 total_paths += int(res.get("count", 0))
                 total_skipped += int(res.get("skipped", 0))
-                worker_files.append((src_index, res.get("gjl"), res.get("idx"), res.get("unr")))
+                worker_files.append(
+                    {
+                        "src_index": src_index,
+                        "gjl": res.get("gjl"),
+                        "idx": res.get("idx"),
+                        "unr": res.get("unr"),
+                        "counts": res.get("counts"),
+                    }
+                )
                 if features_mem_all is not None:
                     features_mem_all.extend(res.get("features", []))
     else:
@@ -464,6 +605,7 @@ def compute_all_pairs_lcps(
                 int(crop_min),
                 bool(fully_connected),
                 bool(geometric),
+                float(pixel_size),
                 float(barrier_cost),
                 bool(use_float32),
                 simplify_tol_m,
@@ -471,11 +613,20 @@ def compute_all_pairs_lcps(
                 tmp_geojsonl_dir,
                 tmp_index_dir,
                 tmp_unreach_dir,
+                tmp_counts_dir,
                 bool(return_features),
             )
             total_paths += int(res.get("count", 0))
             total_skipped += int(res.get("skipped", 0))
-            worker_files.append((src_index, res.get("gjl"), res.get("idx"), res.get("unr")))
+            worker_files.append(
+                {
+                    "src_index": src_index,
+                    "gjl": res.get("gjl"),
+                    "idx": res.get("idx"),
+                    "unr": res.get("unr"),
+                    "counts": res.get("counts"),
+                }
+            )
             if features_mem_all is not None:
                 features_mem_all.extend(res.get("features", []))
 
@@ -484,13 +635,13 @@ def compute_all_pairs_lcps(
         # nodes order
         with open(nodes_order_csv, "w", encoding="utf-8") as fno:
             for nid in ids:
-                fno.write(str(nid) + "
-")
+                fno.write(str(nid) + "\n")
 
         # GEOJSONL
         if final_geojsonl:
             with open(final_geojsonl, "w", buffering=8*1024*1024, encoding="utf-8") as out_gjl:
-                for src_index, gjl_path, _, _ in sorted(worker_files, key=lambda x: x[0]):
+                for wf in sorted(worker_files, key=lambda x: x["src_index"]):
+                    gjl_path = wf.get("gjl")
                     if gjl_path and os.path.exists(gjl_path):
                         with open(gjl_path, "r", encoding="utf-8") as f:
                             shutil.copyfileobj(f, out_gjl)
@@ -500,7 +651,8 @@ def compute_all_pairs_lcps(
             with open(final_index_csv, "w", newline="", encoding="utf-8") as out_csv:
                 writer = csv.writer(out_csv)
                 writer.writerow(["source", "target", "cost", "length_m", "n_vertices"])
-                for src_index, _, idx_path, _ in sorted(worker_files, key=lambda x: x[0]):
+                for wf in sorted(worker_files, key=lambda x: x["src_index"]):
+                    idx_path = wf.get("idx")
                     if idx_path and os.path.exists(idx_path):
                         with open(idx_path, "r", newline="", encoding="utf-8") as f:
                             shutil.copyfileobj(f, out_csv)
@@ -510,38 +662,78 @@ def compute_all_pairs_lcps(
             with open(final_unreach_csv, "w", newline="", encoding="utf-8") as out_unr:
                 writer = csv.writer(out_unr)
                 writer.writerow(["source", "target", "reason"])
-                for src_index, _, _, unr_path in sorted(worker_files, key=lambda x: x[0]):
+                for wf in sorted(worker_files, key=lambda x: x["src_index"]):
+                    unr_path = wf.get("unr")
                     if unr_path and os.path.exists(unr_path):
                         with open(unr_path, "r", newline="", encoding="utf-8") as f:
                             shutil.copyfileobj(f, out_unr)
 
-        # Optional small preview FeatureCollection for UI
-        preview_out = None
-        if preview_geojson and final_geojsonl and preview_n and preview_n > 0:
-            try:
-                feats = []
-                with open(final_geojsonl, "r", encoding="utf-8") as f:
-                    for i, line in enumerate(f):
-                        if i >= int(preview_n):
-                            break
-                        feats.append(json.loads(line))
-                preview_fc = {"type": "FeatureCollection", "features": feats}
-                with open(preview_geojson, "w", encoding="utf-8") as pf:
-                    json.dump(preview_fc, pf)
-                preview_out = preview_geojson
-            except Exception:
-                preview_out = None
+        _append_node_coordinates_to_pair_csv(
+            final_index_csv,
+            nodes_df,
+            id_col=id_col,
+            lon_col=lon_col,
+            lat_col=lat_col,
+        )
+        _append_node_coordinates_to_pair_csv(
+            final_unreach_csv,
+            nodes_df,
+            id_col=id_col,
+            lon_col=lon_col,
+            lat_col=lat_col,
+        )
 
-        # Cleanup temps
+        if counts_mem is not None and final_count_tif:
+            for wf in sorted(worker_files, key=lambda x: x["src_index"]):
+                counts_info = wf.get("counts")
+                if not counts_info:
+                    continue
+                c_path = counts_info.get("path")
+                if not c_path or not os.path.exists(c_path):
+                    continue
+                row_off = int(counts_info.get("row_off", 0))
+                col_off = int(counts_info.get("col_off", 0))
+                height = int(counts_info.get("height", 0))
+                width = int(counts_info.get("width", 0))
+                arr = np.load(c_path)
+                counts_mem[row_off:row_off + height, col_off:col_off + width] += arr.astype(np.uint32, copy=False)
+            counts_mem.flush()
+            with rasterio.open(
+                final_count_tif,
+                "w",
+                driver="GTiff",
+                height=H,
+                width=W,
+                count=1,
+                dtype="uint32",
+                transform=transform,
+                crs=raster_crs,
+                nodata=0,
+                compress="LZW",
+            ) as dst:
+                dst.write(np.asarray(counts_mem, dtype=np.uint32), 1)
+            del counts_mem
+            if mmap_path and os.path.exists(mmap_path):
+                os.remove(mmap_path)
+
+        if outdir and final_index_csv and nodes_order_csv:
+            try:
+                matrix_csv = write_cost_matrix_from_index(
+                    final_index_csv,
+                    nodes_order_csv,
+                    os.path.join(outdir, "lcp_cost_matrix.csv"),
+                )
+            except Exception:
+                matrix_csv = None
+
         if cleanup_tmp:
-            for p in (tmp_geojsonl_dir, tmp_index_dir, tmp_unreach_dir):
+            for p in (tmp_geojsonl_dir, tmp_index_dir, tmp_unreach_dir, tmp_counts_dir):
                 try:
                     p and shutil.rmtree(p)
                 except Exception:
                     pass
     else:
-        nodes_order_csv = final_geojsonl = final_index_csv = final_unreach_csv = None
-        preview_out = None
+        nodes_order_csv = final_geojsonl = final_index_csv = final_unreach_csv = final_count_tif = matrix_csv = None
 
     result = {
         "count": int(total_paths),
@@ -567,7 +759,8 @@ def compute_all_pairs_lcps(
         "index_csv_path": final_index_csv,
         "unreachable_csv_path": final_unreach_csv,
         "nodes_order_path": nodes_order_csv,
-        "preview_geojson_path": preview_out,
+        "path_counts_tif": final_count_tif,
+        "cost_matrix_path": matrix_csv,
     }
 
     if features_mem_all is not None:
@@ -576,4 +769,4 @@ def compute_all_pairs_lcps(
     return result
 
 
-__all__ = ["FLCPParams", "compute_all_pairs_lcps"]
+__all__ = ["FLCPParams", "compute_all_pairs_lcps", "write_cost_matrix_from_index"]
