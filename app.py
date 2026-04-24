@@ -2090,25 +2090,28 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         buttons=[],  # no download/share/fullscreen buttons
         elem_id="logo-img"
     )
-    gr.HTML(
-        """ 
+gr.HTML(
+    """
     <style>
     .gradio-container {
         max-width: 100% !important;
         padding-left: 4px !important;
         padding-right: 4px !important;
     }
+
     #spatchat-workarea {
         overflow-x: auto;
         overflow-y: visible;
         padding-bottom: 8px;
     }
+
     #spatchat-workarea > .gradio-row {
         min-width: 900px;
         align-items: stretch;
         flex-wrap: nowrap;
         gap: 0 !important;
     }
+
     #spatchat-sidebar {
         min-width: 0 !important;
         max-width: 1200px;
@@ -2120,21 +2123,26 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         scrollbar-color: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) var(--background-fill-secondary);
         scrollbar-width: thin;
     }
+
     #spatchat-sidebar::-webkit-scrollbar {
         width: 12px;
     }
+
     #spatchat-sidebar::-webkit-scrollbar-track {
         background: var(--background-fill-secondary);
         border-radius: 999px;
     }
+
     #spatchat-sidebar::-webkit-scrollbar-thumb {
         background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%);
         border-radius: 999px;
         border: 2px solid var(--background-fill-secondary);
     }
+
     #spatchat-sidebar::-webkit-scrollbar-thumb:hover {
         background: color-mix(in srgb, var(--background-fill-secondary) 70%, white 30%);
     }
+
     #spatchat-sidebar::-webkit-scrollbar-button:single-button {
         display: block;
         height: 12px;
@@ -2145,24 +2153,30 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         background-position: center;
         background-size: 7px 7px;
     }
+
     #spatchat-sidebar::-webkit-scrollbar-button:single-button:vertical:decrement {
         background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 6.5 5 3.5 8 6.5' fill='none' stroke='%23606b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
+
     #spatchat-sidebar::-webkit-scrollbar-button:single-button:vertical:increment {
         background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23606b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
+
     .dark #spatchat-sidebar {
-        scrollbar-color: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) var(--background-fill-secondary); 
+        scrollbar-color: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) var(--background-fill-secondary);
     }
+
     .dark #spatchat-sidebar::-webkit-scrollbar-thumb,
     .dark #spatchat-sidebar::-webkit-scrollbar-button:single-button {
         background-color: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%);
         background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%);
     }
+
     #spatchat-sidebar > div {
         margin-left: 0 !important;
         margin-right: 0 !important;
     }
+
     #spatchat-chatbot,
     #spatchat-user-input,
     #spatchat-raster-input,
@@ -2171,6 +2185,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         margin-left: 0 !important;
         margin-right: 0 !important;
     }
+
+    /* Chat container */
     #spatchat-chatbot {
         padding-left: 0 !important;
         padding-right: 0 !important;
@@ -2178,73 +2194,51 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         font-size: 16px !important;
         height: 56vh !important;
         min-height: 56vh !important;
-    }
-    #spatchat-chatbot > div,
-    #spatchat-chatbot .wrap,
-    #spatchat-chatbot .bubble-wrap,
-    #spatchat-chatbot .message-wrap, 
-    #spatchat-chatbot .message,
-    #spatchat-chatbot .panel-wrap {
-        margin-left: 0 !important;
-        margin-right: 0 !important;
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-    }
-    #spatchat-chatbot .panel-wrap,
-    #spatchat-chatbot .wrap, 
-    #spatchat-chatbot .bubble-wrap,
-    #spatchat-chatbot .message-wrap,
-    #spatchat-chatbot .message,
-    #spatchat-chatbot .message-row.panel, 
-    #spatchat-chatbot .message-row.panel.user-row,
-    #spatchat-chatbot .message-row.panel.bot-row,
-    #spatchat-chatbot .wrapper {
         background: var(--spatchat-connect-bg) !important;
-    }
-    #spatchat-chatbot,
-    #spatchat-chatbot > div {
-        background: var(--spatchat-connect-bg) !important; 
         border: none !important;
         box-shadow: none !important;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
+        overflow: hidden !important;
     }
-    #spatchat-chatbot, 
-    #spatchat-chatbot > div,
-    #spatchat-chatbot .panel-wrap,
-    #spatchat-chatbot .wrap {
+
+    #spatchat-chatbot > div {
+        background: var(--spatchat-connect-bg) !important;
+        border: none !important;
+        box-shadow: none !important;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
+    }
+
+    #spatchat-chatbot,
+    #spatchat-chatbot > div {
         scrollbar-color: rgba(133, 146, 171, 0.75) var(--spatchat-connect-bg);
         scrollbar-width: thin;
     }
+
     #spatchat-chatbot::-webkit-scrollbar,
-    #spatchat-chatbot > div::-webkit-scrollbar,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar,
-    #spatchat-chatbot .wrap::-webkit-scrollbar {
+    #spatchat-chatbot > div::-webkit-scrollbar {
         width: 12px;
     }
+
     #spatchat-chatbot::-webkit-scrollbar-track,
-    #spatchat-chatbot > div::-webkit-scrollbar-track,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar-track,
-    #spatchat-chatbot .wrap::-webkit-scrollbar-track {
+    #spatchat-chatbot > div::-webkit-scrollbar-track {
         background: var(--spatchat-connect-bg);
         border-radius: 999px;
     }
+
     #spatchat-chatbot::-webkit-scrollbar-thumb,
-    #spatchat-chatbot > div::-webkit-scrollbar-thumb,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar-thumb,
-    #spatchat-chatbot .wrap::-webkit-scrollbar-thumb {
+    #spatchat-chatbot > div::-webkit-scrollbar-thumb {
         background: #323845;
         border-radius: 999px;
         border: 2px solid var(--spatchat-connect-bg);
     }
+
     #spatchat-chatbot::-webkit-scrollbar-thumb:hover,
-    #spatchat-chatbot > div::-webkit-scrollbar-thumb:hover,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar-thumb:hover,
-    #spatchat-chatbot .wrap::-webkit-scrollbar-thumb:hover {
+    #spatchat-chatbot > div::-webkit-scrollbar-thumb:hover {
         background: #323845;
     }
+
     #spatchat-chatbot::-webkit-scrollbar-button:single-button,
-    #spatchat-chatbot > div::-webkit-scrollbar-button:single-button,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar-button:single-button,
-    #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button {
+    #spatchat-chatbot > div::-webkit-scrollbar-button:single-button {
         display: block;
         height: 12px;
         background-color: #323845;
@@ -2254,44 +2248,49 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         background-position: center;
         background-size: 7px 7px;
     }
+
     #spatchat-chatbot::-webkit-scrollbar-button:single-button:vertical:decrement,
-    #spatchat-chatbot > div::-webkit-scrollbar-button:single-button:vertical:decrement,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar-button:single-button:vertical:decrement,
-    #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button:vertical:decrement {
+    #spatchat-chatbot > div::-webkit-scrollbar-button:single-button:vertical:decrement {
         background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 6.5 5 3.5 8 6.5' fill='none' stroke='%23c7ced9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
+
     #spatchat-chatbot::-webkit-scrollbar-button:single-button:vertical:increment,
-    #spatchat-chatbot > div::-webkit-scrollbar-button:single-button:vertical:increment,
-    #spatchat-chatbot .panel-wrap::-webkit-scrollbar-button:single-button:vertical:increment,
-    #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button:vertical:increment {
+    #spatchat-chatbot > div::-webkit-scrollbar-button:single-button:vertical:increment {
         background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23c7ced9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
+
+    /* Remove default action buttons/icons */
+    #spatchat-chatbot button[aria-label*="Copy"],
+    #spatchat-chatbot button[aria-label*="copy"],
+    #spatchat-chatbot button[aria-label*="Share"],
+    #spatchat-chatbot button[aria-label*="share"] {
+        display: none !important;
+    }
+
+    /* Input area */
     #spatchat-user-input {
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important; 
+        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
         border-radius: 0 0 var(--radius-lg) var(--radius-lg) !important;
         padding: 6px 10px !important;
         margin-top: -8px !important;
         border-top: none !important;
     }
+
     .dark #spatchat-user-input {
         background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
-    } 
-    #spatchat-chatbot {
-        border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
-        overflow: hidden !important;
     }
-    #spatchat-chatbot > div {
-        border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
-    }
-    #spatchat-user-input > div, 
+
+    #spatchat-user-input > div,
     #spatchat-user-input .wrap,
     #spatchat-user-input label {
         background: transparent !important;
     }
+
     #spatchat-user-input .input-container {
         align-items: center !important;
     }
-    #spatchat-user-input textarea, 
+
+    #spatchat-user-input textarea,
     #spatchat-user-input input {
         background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
         border: none !important;
@@ -2302,216 +2301,136 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         padding: 8px 12px !important;
         line-height: 18px !important;
     }
+
     #spatchat-user-input textarea {
         max-height: 240px !important;
         overflow-y: auto !important;
         resize: vertical !important;
     }
-    #spatchat-user-input input { 
+
+    #spatchat-user-input input {
         overflow: hidden !important;
     }
+
     .dark #spatchat-user-input textarea,
     .dark #spatchat-user-input input {
         background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
     }
+
     #spatchat-user-input textarea::placeholder,
-    #spatchat-user-input input::placeholder { 
+    #spatchat-user-input input::placeholder {
         color: var(--body-text-color-subdued) !important;
         text-align: left !important;
     }
-    #spatchat-chatbot .message-row.panel,
-    #spatchat-chatbot .message-row.panel.user-row,
-    #spatchat-chatbot .message-row.panel.bot-row {
-        background: transparent !important;
-        margin: 0 !important;
-        padding: 6px 0 !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row, 
-    #spatchat-chatbot .message-row.panel.bot-row {
+
+    /* Chat rows */
+    #spatchat-chatbot .message-row,
+    #spatchat-chatbot .message-wrap,
+    #spatchat-chatbot .bubble-wrap,
+    #spatchat-chatbot .wrap {
         background: transparent !important;
     }
-    #spatchat-chatbot .message { 
-        width: 100% !important;
+
+    /* Assistant: no bubble */
+    #spatchat-chatbot .message-row.bot,
+    #spatchat-chatbot .message-row.assistant,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] {
+        background: transparent !important;
+        justify-content: flex-start !important;
     }
-    #spatchat-chatbot .flex-wrap.user,
-    #spatchat-chatbot .flex-wrap.bot {
+
+    #spatchat-chatbot .message-row.bot .message,
+    #spatchat-chatbot .message-row.assistant .message,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] .message {
+        background: transparent !important;
         border: none !important;
         box-shadow: none !important;
-        padding: 8px 12px !important;
-    } 
-    #spatchat-chatbot .flex-wrap.bot {
-        background: transparent !important;
-        border-bottom-left-radius: var(--radius-md) !important;
-    }
-    #spatchat-chatbot .flex-wrap.user {
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
-        border-bottom-right-radius: var(--radius-md) !important;
-    }
-    .dark #spatchat-chatbot .flex-wrap.user {
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row {
-        align-self: stretch !important;
-        width: 100% !important;
-        background: transparent !important;
-        display: flex !important;
-        justify-content: flex-end !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .message {
-        display: flex !important; 
-        justify-content: flex-end !important;
-        width: 100% !important;
-        margin-bottom: 0 !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .message > div {
-        display: flex !important;
-        justify-content: flex-end !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        max-width: 100% !important;
         width: auto !important;
-        max-width: min(72%, 680px) !important;
-        height: auto !important;
-        flex: 0 1 auto !important;
+        color: inherit !important;
+    }
+
+    #spatchat-chatbot .message-row.bot .message *,
+    #spatchat-chatbot .message-row.assistant .message *,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] .message * {
+        background: transparent !important;
+    }
+
+    /* User row aligned right */
+    #spatchat-chatbot .message-row.user,
+    #spatchat-chatbot [data-testid="chatbot-message-user"] {
+        background: transparent !important;
+        display: flex !important;
+        justify-content: flex-end !important;
+    }
+
+    /* User bubble */
+    #spatchat-chatbot .message-row.user .message,
+    #spatchat-chatbot [data-testid="chatbot-message-user"] .message {
         margin-left: auto !important;
         margin-right: 0 !important;
-        align-self: flex-end !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .user { 
-        display: block !important;
-        vertical-align: top !important;
-        width: auto !important;
-        max-width: 100% !important;
-        height: auto !important;
-        flex: 0 1 auto !important;
-        margin: 0 !important;
-        align-self: flex-end !important;
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        border-radius: 0 !important;
-        padding: 0 !important;
-        white-space: normal !important;
-        word-break: normal !important;
-        overflow-wrap: break-word !important;
-        text-align: left !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user { 
-        display: block !important;
         width: auto !important;
         max-width: min(72%, 680px) !important;
-        min-width: 0 !important;
-        height: auto !important;
-        margin: 0 0 0 auto !important;
         padding: 10px 14px !important;
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
         border: none !important;
         box-shadow: none !important;
-        border-radius: var(--radius-md) !important;
-        border-bottom-right-radius: 0 !important;
-        white-space: normal !important;
-        word-break: normal !important;
-        overflow-wrap: break-word !important;
+        border-radius: 16px 16px 4px 16px !important;
+        background: #5b86c5 !important;
+        color: #ffffff !important;
     }
-    #spatchat-chatbot .message-row.panel.user-row .user *, 
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user * {
-        text-align: left !important;
+
+    .dark #spatchat-chatbot .message-row.user .message,
+    .dark #spatchat-chatbot [data-testid="chatbot-message-user"] .message {
+        background: #4d79bd !important;
+        color: #ffffff !important;
     }
-    #spatchat-chatbot .message-row.panel.user-row .user > div,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user > div,
-    #spatchat-chatbot .message-row.panel.user-row .user > div > div,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user > div > div,
-    #spatchat-chatbot .message-row.panel.user-row .user .wrapper, 
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .wrapper,
-    #spatchat-chatbot .message-row.panel.user-row .user .md,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .md,
-    #spatchat-chatbot .message-row.panel.user-row .user .prose,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .prose,
-    #spatchat-chatbot .message-row.panel.user-row .user p,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user p {
+
+    #spatchat-chatbot .message-row.user .message *,
+    #spatchat-chatbot [data-testid="chatbot-message-user"] .message * {
+        color: inherit !important;
         background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        padding: 0 !important;
-        width: auto !important;
-        max-width: 100% !important;
-        min-width: 0 !important;
-        height: auto !important;
-        min-height: 0 !important;
-        flex-grow: 0 !important;
-        gap: 0 !important;
-        margin: 0 !important;
-        white-space: normal !important;
     }
-    #spatchat-chatbot .message-row.panel.user-row .user .md > * + *,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .md > * + *,
-    #spatchat-chatbot .message-row.panel.user-row .user .prose > * + *,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .prose > * + * {
-        margin-top: 0.35rem !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .user .md pre,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .md pre {
-        white-space: pre !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .user .md > *, 
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .md > *,
-    #spatchat-chatbot .message-row.panel.user-row .user .prose > *,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user .prose > * {
-        margin-top: 0 !important;
-        margin-bottom: 0 !important;
-    }
-    #spatchat-chatbot .message-row.panel.user-row .user div:empty,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user div:empty, 
-    #spatchat-chatbot .message-row.panel.user-row .user p:empty,
-    #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user p:empty {
-        display: none !important;
-    }
-    .dark #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user {
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
-    }
-    #spatchat-chatbot .spatchat-status { 
+
+    /* Status */
+    #spatchat-chatbot .spatchat-status,
+    #spatchat-status .spatchat-status {
         display: inline-flex;
         align-items: center;
         gap: 8px;
         color: var(--body-text-color-subdued);
         font-weight: 500;
     }
-    #spatchat-chatbot .spatchat-status-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #5b86c5;
-        animation: spatchat-pulse 1.2s ease-in-out infinite;
-    } 
-    #spatchat-chatbot .spatchat-status-time {
-        color: var(--body-text-color-subdued);
-        font-size: 0.92em;
-    }
-    #spatchat-status {
-        min-height: 24px;
-        margin: 4px 0 8px 0 !important;
-        color: var(--body-text-color-subdued);
-        font-size: 14px;
-    }
-    #spatchat-status .spatchat-status { 
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        color: var(--body-text-color-subdued);
-        font-weight: 500;
-    }
+
+    #spatchat-chatbot .spatchat-status-dot,
     #spatchat-status .spatchat-status-dot {
         width: 8px;
         height: 8px;
         border-radius: 999px;
         background: #5b86c5;
         animation: spatchat-pulse 1.2s ease-in-out infinite;
-    } 
+    }
+
+    #spatchat-chatbot .spatchat-status-time,
     #spatchat-status .spatchat-status-time {
         color: var(--body-text-color-subdued);
         font-size: 0.92em;
     }
+
+    #spatchat-status {
+        min-height: 24px;
+        margin: 4px 0 8px 0 !important;
+        color: var(--body-text-color-subdued);
+        font-size: 14px;
+    }
+
     @keyframes spatchat-pulse {
         0%, 100% { opacity: 0.35; }
         50% { opacity: 1; }
     }
+
+    /* Splitter */
     #spatchat-splitter {
         min-width: 10px;
         max-width: 10px;
@@ -2525,7 +2444,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         background: transparent !important;
         overflow: visible !important;
     }
-    #spatchat-splitter > div, 
+
+    #spatchat-splitter > div,
     #spatchat-splitter .gradio-html,
     #spatchat-splitter .gradio-html > div {
         height: 100%;
@@ -2534,7 +2454,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         margin: 0 !important;
         background: transparent !important;
     }
-    #spatchat-splitter .spatchat-splitter-handle { 
+
+    #spatchat-splitter .spatchat-splitter-handle {
         position: absolute;
         inset: 0;
         display: block;
@@ -2543,7 +2464,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         cursor: col-resize;
         user-select: none;
         background: transparent;
-    } 
+    }
+
     #spatchat-splitter .spatchat-splitter-handle::before {
         content: "";
         position: absolute;
@@ -2556,41 +2478,56 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         border-radius: 999px;
         transition: background 120ms ease, width 120ms ease;
     }
-    #spatchat-splitter:hover .spatchat-splitter-handle::before, 
+
+    #spatchat-splitter:hover .spatchat-splitter-handle::before,
     body.spatchat-resizing #spatchat-splitter .spatchat-splitter-handle::before {
         width: 2px;
         background: #5b86c5;
     }
+
     body.spatchat-resizing,
     body.spatchat-resizing * {
         cursor: col-resize !important;
         user-select: none !important;
     }
-    #spatchat-mapcol { 
+
+    /* Map */
+    #spatchat-mapcol {
         min-width: 0 !important;
         flex: 1 1 auto !important;
         width: auto !important;
     }
+
     #spatchat-map {
         min-height: 78vh;
         height: 78vh;
         overflow: visible;
-        width: 100%; 
+        width: 100%;
     }
+
+    #spatchat-map > div {
+        height: 100%;
+    }
+
     #spatchat-map iframe {
         width: 100% !important;
         height: 100% !important;
+        min-height: 78vh;
         border: none;
     }
+
     body.spatchat-resizing #spatchat-map iframe {
         pointer-events: none !important;
     }
-    #spatchat-download { 
+
+    /* Download */
+    #spatchat-download {
         display: flex;
         justify-content: center;
         width: 100%;
         margin-top: 10px;
     }
+
     #spatchat-download button {
         min-width: 220px;
         width: 100%;
@@ -2599,29 +2536,17 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
         justify-content: center !important;
         gap: 8px;
         text-align: center;
-    } 
-    #spatchat-map > div {
-        height: 100%;
     }
-    #spatchat-map iframe {
-        width: 100% !important;
-        height: 100% !important;
-        min-height: 78vh;
-        border: none;
-    } 
+
+    /* Logo */
     #logo-img img {
         height: 90px;
         margin: 10px 50px 10px 10px;
         border-radius: 6px;
     }
-    body.spatchat-resizing,
-    body.spatchat-resizing * {
-        cursor: col-resize !important;
-        user-select: none !important;
-    }
     </style>
-    """ 
-    )
+    """
+)
     gr.Markdown("## 🌐 SpatChat: Connectivity Analysis {connect} 🦌🦅🦝")
     gr.HTML(
         """
@@ -2654,7 +2579,13 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
                 label="SpatChat",
                 show_label=False,
                 layout="bubble",
-                value=[{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\nUpload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\nOptionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, populations, detections, or sites, with longitude/latitude columns."}],
+                buttons=[],
+                value=[
+                    {
+                        "role": "assistant",
+                        "content": "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\nUpload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\nOptionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, populations, detections, or sites, with longitude/latitude columns."
+                    }
+                ],
                 elem_id="spatchat-chatbot",
             )
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
