@@ -2086,9 +2086,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
     gr.Image(
         value="logo_long1.png",
         show_label=False,
-        show_download_button=False,
-        show_share_button=False,
         type="filepath",
+        buttons=[],  # no download/share/fullscreen buttons
         elem_id="logo-img"
     )
     gr.HTML(
