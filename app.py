@@ -2081,7 +2081,7 @@ window.spatchatBeginResize = function(event) {
 </script>
 """
 
-with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as demo:
+with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     session_cache = gr.State(_fresh_cache()) # type: ignore
     gr.Image(
         value="logo_long1.png",
@@ -2546,7 +2546,7 @@ gr.HTML(
     }
     </style>
     """
-)
+    )
     gr.Markdown("## 🌐 SpatChat: Connectivity Analysis {connect} 🦌🦅🦝")
     gr.HTML(
         """
@@ -2657,8 +2657,7 @@ gr.HTML(
     )
 
 def _launch_demo(blocks: gr.Blocks) -> None:
-    """Launch helper that tolerates Gradio API differences."""
-    launch_kwargs = {"share": True}
+    launch_kwargs = {"share": True, "head": _SPLITTER_HEAD}
     try:
         sig = inspect.signature(gr.Blocks.launch)
         params = getattr(sig, "parameters", {}) or {}
