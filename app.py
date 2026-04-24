@@ -2090,7 +2090,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         buttons=[],  # no download/share/fullscreen buttons
         elem_id="logo-img"
     )
-gr.HTML(
+    gr.HTML(
     """
     <style>
     .gradio-container {
