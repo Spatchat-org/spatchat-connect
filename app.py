@@ -2654,7 +2654,6 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
                 label="SpatChat",
                 show_label=False,
                 layout="panel",
-                bubble_full_width=True,
                 value=[{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\nUpload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\nOptionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, populations, detections, or sites, with longitude/latitude columns."}],
                 elem_id="spatchat-chatbot",
             )
