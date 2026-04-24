@@ -2727,7 +2727,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis", head=_SPLITTER_HEAD) as 
 
 def _launch_demo(blocks: gr.Blocks) -> None:
     """Launch helper that tolerates Gradio API differences."""
-    launch_kwargs = {"share": True, "show_api": False}
+    launch_kwargs = {"share": True}
     try:
         sig = inspect.signature(gr.Blocks.launch)
         params = getattr(sig, "parameters", {}) or {}
