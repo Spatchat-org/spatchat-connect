@@ -1,5 +1,5 @@
 # --- Core UI ---
-gradio>=4.24,<5
+gradio[oauth,mcp]==6.13.0
 pandas>=2.2,<3
 numpy>=1.26,<2        # keep <2 for broad geo-stack compat
 
