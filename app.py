@@ -2372,7 +2372,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         margin-left: auto !important;
         margin-right: 0 !important;
         width: auto !important;
-        max-width: min(72%, 680px) !important;
+        max-width: 90% !important;
         padding: 10px 14px !important;
         border: none !important;
         box-shadow: none !important;
