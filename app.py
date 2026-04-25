@@ -68,6 +68,12 @@ def _fresh_cache() -> dict:
         "raster_path": None,
         "raster_bounds": None,   # (minx, miny, maxx, maxy) in raster CRS
         "raster_crs": None,      # proj string or EPSG code
+        "raster_width": None,
+        "raster_height": None,
+        "raster_count": None,
+        "raster_resolution": None,
+        "raster_bounds_wgs84": None,
+        "raster_centroid_wgs84": None,
         "surface_type": None,    # suitability / resistance / conductance
         "awaiting_surface_type": False,
         "last_upload_kind": None,  # "raster" or "nodes"
@@ -403,6 +409,12 @@ def _reset_raster_cache(cache: dict) -> None:
     cache["raster_path"] = None
     cache["raster_bounds"] = None
     cache["raster_crs"] = None
+    cache["raster_width"] = None
+    cache["raster_height"] = None
+    cache["raster_count"] = None
+    cache["raster_resolution"] = None
+    cache["raster_bounds_wgs84"] = None
+    cache["raster_centroid_wgs84"] = None
     cache["surface_type"] = None
     cache["awaiting_surface_type"] = False
     cache["awaiting_conversion_choice"] = False
@@ -986,6 +998,22 @@ def _detect_intent(message: str) -> Optional[str]:
 
 def _detect_intents(message: str) -> list[str]:
     msg = message.lower()
+    question_like = bool(
+        msg.strip().endswith("?")
+        or re.match(r"\s*(what|which|where|when|why|how|is|are|do|does|did|can|could|should)\b", msg)
+    )
+    explanation_like = bool(
+        re.search(r"\b(what\s+does|what\s+do|mean|means|explain|interpret|interpretation|describe)\b", msg)
+    )
+    instruction_question = bool(re.match(r"\s*how\s+(can|do|should)\s+i\b", msg))
+    action_terms = (
+        "run", "compute", "calculate", "create", "generate", "build", "make",
+        "analyze", "analyse", "map", "use",
+    )
+    has_action_term = any(re.search(rf"\b{term}\b", msg) for term in action_terms)
+    if (question_like or explanation_like) and (not has_action_term or instruction_question):
+        return []
+
     if any(phrase in msg for phrase in ("run all models", "all models", "run all analyses", "all analyses", "all workflows")):
         return ["run_kernel", "run_lcp", "run_circuit", "run_graph"]
     lcp_keywords = [
@@ -1068,16 +1096,219 @@ def _kernel_distance_prompt() -> str:
     )
 
 
+def _bounds_tuple(bounds) -> Optional[Tuple[float, float, float, float]]:
+    if bounds is None:
+        return None
+    try:
+        return (float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top))
+    except Exception:
+        pass
+    try:
+        values = tuple(float(v) for v in bounds)
+    except Exception:
+        return None
+    if len(values) != 4:
+        return None
+    return values
+
+
+def _projected_bounds_context(bounds) -> Optional[dict]:
+    values = _bounds_tuple(bounds)
+    if values is None:
+        return None
+    left, bottom, right, top = values
+    return {
+        "left": left,
+        "bottom": bottom,
+        "right": right,
+        "top": top,
+    }
+
+
+def _set_raster_wgs84_location(cache: dict, bounds, crs) -> bool:
+    cache["raster_bounds_wgs84"] = None
+    cache["raster_centroid_wgs84"] = None
+    values = _bounds_tuple(bounds)
+    if values is None or CRS is None or Transformer is None or crs is None:
+        return False
+
+    left, bottom, right, top = values
+    try:
+        source_crs = CRS.from_user_input(crs)
+    except Exception:
+        return False
+
+    west = south = east = north = None
+    try:
+        from rasterio.warp import transform_bounds
+
+        west, south, east, north = transform_bounds(
+            source_crs,
+            "EPSG:4326",
+            left,
+            bottom,
+            right,
+            top,
+            densify_pts=21,
+        )
+    except Exception:
+        try:
+            transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+            corners = [
+                transformer.transform(left, bottom),
+                transformer.transform(left, top),
+                transformer.transform(right, bottom),
+                transformer.transform(right, top),
+            ]
+            lon_values = [lon for lon, _lat in corners]
+            lat_values = [lat for _lon, lat in corners]
+            west, east = min(lon_values), max(lon_values)
+            south, north = min(lat_values), max(lat_values)
+        except Exception:
+            return False
+
+    try:
+        transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+        centroid_lon, centroid_lat = transformer.transform((left + right) / 2.0, (bottom + top) / 2.0)
+    except Exception:
+        centroid_lon = (float(west) + float(east)) / 2.0
+        centroid_lat = (float(south) + float(north)) / 2.0
+
+    cache["raster_bounds_wgs84"] = {
+        "west_longitude": float(west),
+        "south_latitude": float(south),
+        "east_longitude": float(east),
+        "north_latitude": float(north),
+    }
+    cache["raster_centroid_wgs84"] = {
+        "longitude": float(centroid_lon),
+        "latitude": float(centroid_lat),
+    }
+    return True
+
+
+def _refresh_raster_metadata(cache: dict) -> bool:
+    raster_path = cache.get("raster_path")
+    if rasterio is None or not raster_path or not os.path.exists(raster_path):
+        return False
+    try:
+        with rasterio.open(raster_path) as ds:
+            cache["raster_bounds"] = ds.bounds
+            cache["raster_crs"] = str(ds.crs) if ds.crs else None
+            cache["raster_width"] = int(ds.width)
+            cache["raster_height"] = int(ds.height)
+            cache["raster_count"] = int(ds.count)
+            cache["raster_resolution"] = tuple(float(v) for v in ds.res)
+            _set_raster_wgs84_location(cache, ds.bounds, ds.crs)
+    except Exception:
+        return False
+
+    session = cache.get("session_info")
+    if isinstance(session, dict):
+        session["raster_bounds"] = cache["raster_bounds"]
+        session["raster_crs"] = cache["raster_crs"]
+        session["raster_width"] = cache["raster_width"]
+        session["raster_height"] = cache["raster_height"]
+        session["raster_count"] = cache["raster_count"]
+        session["raster_resolution"] = cache["raster_resolution"]
+        session["raster_bounds_wgs84"] = cache["raster_bounds_wgs84"]
+        session["raster_centroid_wgs84"] = cache["raster_centroid_wgs84"]
+    return True
+
+
+def _to_jsonable(value):
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "item"):
+        try:
+            return _to_jsonable(value.item())
+        except Exception:
+            pass
+    return str(value)
+
+
+def _read_json_context(path: Optional[str]) -> Optional[dict]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return _to_jsonable(data) if isinstance(data, dict) else {"value": _to_jsonable(data)}
+
+
+def _dataframe_context(df: Optional[pd.DataFrame], max_rows: int = 10) -> Optional[dict]:
+    if not isinstance(df, pd.DataFrame):
+        return None
+    sample = df.head(max_rows).copy()
+    sample = sample.astype(object).where(pd.notna(sample), None)
+    return {
+        "row_count": int(len(df)),
+        "columns": [str(col) for col in df.columns],
+        "preview_rows": _to_jsonable(sample.to_dict(orient="records")),
+    }
+
+
+def _csv_context(path: Optional[str], max_rows: int = 10) -> Optional[dict]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        preview = pd.read_csv(path, nrows=max_rows)
+    except Exception:
+        return None
+    row_count = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            row_count = max(sum(1 for _ in f) - 1, 0)
+    except Exception:
+        pass
+    ctx = _dataframe_context(preview, max_rows=max_rows) or {}
+    if row_count is not None:
+        ctx["row_count"] = int(row_count)
+    ctx["path_name"] = os.path.basename(path)
+    return ctx
+
+
 def _build_llm_context(cache: dict) -> dict:
+    if cache.get("raster_path") and (cache.get("raster_width") is None or cache.get("raster_height") is None):
+        _refresh_raster_metadata(cache)
     session_info = cache.get("session_info") if isinstance(cache.get("session_info"), dict) else {}
     nodes_df = cache.get("nodes_df")
     preview_rasters = cache.get("preview_rasters") if isinstance(cache.get("preview_rasters"), dict) else {}
+    raster_width = cache.get("raster_width")
+    raster_height = cache.get("raster_height")
+    raster_count = cache.get("raster_count")
 
     context = {
         "has_raster": bool(cache.get("raster_path")),
         "raster_name": session_info.get("raster_name"),
         "raster_crs": cache.get("raster_crs"),
         "raster_bounds": cache.get("raster_bounds"),
+        "raster_bounds_projected": _projected_bounds_context(cache.get("raster_bounds")),
+        "raster_dimensions": {
+            "width_columns": int(raster_width) if raster_width is not None else None,
+            "height_rows": int(raster_height) if raster_height is not None else None,
+            "band_count": int(raster_count) if raster_count is not None else None,
+        },
+        "raster_resolution": cache.get("raster_resolution"),
+        "raster_location": {
+            "centroid_wgs84": cache.get("raster_centroid_wgs84"),
+            "bounds_wgs84": cache.get("raster_bounds_wgs84"),
+            "note": (
+                "Coordinates are derived from raster bounds. A precise place name requires reverse geocoding "
+                "or an administrative boundary lookup."
+            ),
+        },
         "surface_type": cache.get("surface_type"),
         "has_cost_surface": bool(cache.get("analysis_cost_tif")),
         "has_converted_surface": bool(cache.get("conversion_path")),
@@ -1092,12 +1323,75 @@ def _build_llm_context(cache: dict) -> dict:
         "node_columns": list(nodes_df.columns) if isinstance(nodes_df, pd.DataFrame) else [],
         "nodes_lon_col": cache.get("nodes_lon_col"),
         "nodes_lat_col": cache.get("nodes_lat_col"),
+        "nodes": _dataframe_context(nodes_df, max_rows=10),
         "lcp_ready": bool(cache.get("lcp_geojsonl") or cache.get("lcp_count_tif") or cache.get("lcp_cost_matrix")),
         "circuit_ready": bool(cache.get("circuit_pairs_csv") or cache.get("circuit_summary_json") or cache.get("circuit_current_density_tif")),
         "graph_ready": bool(cache.get("graph_metrics_csv") or cache.get("graph_summary_json")),
+        "result_layer_meanings": {
+            "least_cost_paths": (
+                "Least-cost path edges are pairwise connections between nodes that minimize accumulated cost "
+                "through the resistance/cost raster. The edge cost is not straight-line distance; it reflects "
+                "the modeled movement cost along the cheapest route."
+            ),
+            "graph_edges": (
+                "Graph model edges are network links derived from the least-cost path results. In this app, "
+                "least-cost links are converted to a graph and filtered by probability decay: higher-cost links "
+                "receive lower movement probability, and links below the probability threshold are dropped. "
+                "Use analysis_results.graph.probability_decay for how many links were retained."
+            ),
+            "graph_node_metric": (
+                "The graph node layer is colored by the selected graph metric. Betweenness highlights nodes "
+                "that sit on many shortest routes through the network; high values can indicate potential "
+                "stepping-stones, bottlenecks, or connector sites."
+            ),
+            "circuit_current_density": (
+                "Circuit current density shows where current concentrates across the conductance surface when "
+                "nodes are connected as circuit terminals. Higher current suggests areas important for multiple "
+                "potential movement routes."
+            ),
+            "kernel_surface": (
+                "The cumulative resistant kernel surface sums cost-limited dispersal influence from all source "
+                "nodes. Higher values indicate places reachable by more or stronger source contributions under "
+                "the selected dispersal distance."
+            ),
+        },
+        "analysis_results": {
+            "least_cost_paths": {
+                "ready": bool(cache.get("lcp_geojsonl") or cache.get("lcp_count_tif") or cache.get("lcp_cost_matrix")),
+                "index": _csv_context(cache.get("lcp_index_csv"), max_rows=10),
+                "unreachable": _csv_context(cache.get("lcp_unreachable_csv"), max_rows=10),
+                "cost_matrix": _csv_context(cache.get("lcp_cost_matrix"), max_rows=8),
+                "outputs": {
+                    "geojsonl": os.path.basename(cache["lcp_geojsonl"]) if cache.get("lcp_geojsonl") else None,
+                    "path_counts_tif": os.path.basename(cache["lcp_count_tif"]) if cache.get("lcp_count_tif") else None,
+                    "zip": os.path.basename(cache["lcp_zip_path"]) if cache.get("lcp_zip_path") else None,
+                },
+            },
+            "circuit": {
+                "ready": bool(cache.get("circuit_pairs_csv") or cache.get("circuit_summary_json") or cache.get("circuit_current_density_tif")),
+                "summary": _read_json_context(cache.get("circuit_summary_json")),
+                "pairs": _dataframe_context(cache.get("circuit_pairs_df"), max_rows=10) or _csv_context(cache.get("circuit_pairs_csv"), max_rows=10),
+                "unplaced": _csv_context(cache.get("circuit_unplaced_csv"), max_rows=10),
+                "current_density_layer": bool(cache.get("circuit_current_density_tif")),
+            },
+            "kernel": {
+                "ready": bool(cache.get("kernel_surface_tif") or cache.get("kernel_summary_json")),
+                "summary": _read_json_context(cache.get("kernel_summary_json")),
+                "surface_layer": bool(cache.get("kernel_surface_tif")),
+            },
+            "graph": {
+                "ready": bool(cache.get("graph_metrics_csv") or cache.get("graph_summary_json")),
+                "summary": _read_json_context(cache.get("graph_summary_json")),
+                "selected_metric": cache.get("graph_metric_name"),
+                "metric_ranges": cache.get("graph_metric_ranges"),
+                "probability_decay": cache.get("graph_probability_decay"),
+                "node_metrics": _dataframe_context(cache.get("graph_metrics_df"), max_rows=10) or _csv_context(cache.get("graph_metrics_csv"), max_rows=10),
+                "edges": _dataframe_context(cache.get("graph_edges_df"), max_rows=10),
+            },
+        },
         "preview_layers": list(preview_rasters.keys()),
     }
-    return context
+    return _to_jsonable(context)
 
 
 def _local_fallback_reply(cache: dict) -> str:
@@ -1201,7 +1495,17 @@ def _run_post_kernel_analyses(chat_history, cache, output_dir: str, intents: lis
 
 
 def _should_stream_llm_reply(message: str) -> bool:
-    msg = (message or "").lower()
+    msg = (message or "").strip().lower()
+    question_like = bool(
+        msg.endswith("?")
+        or re.match(r"(what|which|where|when|why|how|is|are|do|does|did|can|could|should)\b", msg)
+    )
+    explanation_like = bool(
+        re.search(r"\b(what\s+does|what\s+do|mean|means|explain|interpret|interpretation|describe)\b", msg)
+    )
+    if question_like or explanation_like:
+        return True
+
     toolish_terms = (
         "least cost", "least-cost", "lcp", "path", "corridor", "graph model", "network analysis",
         "kernel", "crk", "current density", "circuit", "run ", "compute ", "convert ",
@@ -1385,6 +1689,8 @@ def _handle_llm_fallback(chat_history, prior_history, user_message, cache):
             yield chat_history, gr.update(value=_build_preview_map(cache)), _download_update(cache), _status_clear_update(), cache
             return
 
+    started_at = time.time()
+    yield gr.skip(), gr.skip(), gr.skip(), gr.update(value=_status_message("Thinking", started_at)), gr.skip()
     try:
         tool_call, llm_text = ask_llm(prior_history, user_message, context=_build_llm_context(cache))
     except Exception:
@@ -1510,6 +1816,12 @@ def handle_raster_upload(file, cache):
             "raster_uploaded_at": datetime.now(timezone.utc).isoformat(),
             "raster_bounds": None,
             "raster_crs": None,
+            "raster_width": None,
+            "raster_height": None,
+            "raster_count": None,
+            "raster_resolution": None,
+            "raster_bounds_wgs84": None,
+            "raster_centroid_wgs84": None,
             "surface_type": None,
             "nodes_csv": existing_nodes_csv,
             "nodes_uploaded_at": existing_nodes_uploaded_at,
@@ -1546,6 +1858,12 @@ def handle_raster_upload(file, cache):
     if rasterio is None:
         cache["raster_bounds"] = None
         cache["raster_crs"] = None
+        cache["raster_width"] = None
+        cache["raster_height"] = None
+        cache["raster_count"] = None
+        cache["raster_resolution"] = None
+        cache["raster_bounds_wgs84"] = None
+        cache["raster_centroid_wgs84"] = None
         msg = (
             "Raster uploaded. (Install rasterio to see extent preview.)\n\n"
             + _surface_prompt()
@@ -1558,24 +1876,48 @@ def handle_raster_upload(file, cache):
         with rasterio.open(dst) as ds:
             cache["raster_bounds"] = ds.bounds  # (minx, miny, maxx, maxy)
             cache["raster_crs"] = str(ds.crs) if ds.crs else None
+            cache["raster_width"] = int(ds.width)
+            cache["raster_height"] = int(ds.height)
+            cache["raster_count"] = int(ds.count)
+            cache["raster_resolution"] = tuple(float(v) for v in ds.res)
+            _set_raster_wgs84_location(cache, ds.bounds, ds.crs)
     except Exception as e:
         cache["raster_bounds"] = None
         cache["raster_crs"] = None
+        cache["raster_width"] = None
+        cache["raster_height"] = None
+        cache["raster_count"] = None
+        cache["raster_resolution"] = None
+        cache["raster_bounds_wgs84"] = None
+        cache["raster_centroid_wgs84"] = None
         msg = (
             f"Raster uploaded, but metadata read failed: {e}\n\n"
             + _surface_prompt()
         )
         return ([{"role": "assistant", "content": msg}], _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache)
 
-    info = "\n".join([
+    centroid = cache.get("raster_centroid_wgs84") or {}
+    location_line = ""
+    if centroid.get("latitude") is not None and centroid.get("longitude") is not None:
+        location_line = (
+            f"- Approx. WGS84 centroid: {centroid['latitude']:.6f}, {centroid['longitude']:.6f}"
+        )
+
+    info_lines = [
         "Raster uploaded.",
         f"- Bounds: {cache['raster_bounds']}",
         f"- CRS: {cache['raster_crs']}",
+        f"- Dimensions: {cache['raster_width']} columns x {cache['raster_height']} rows ({cache['raster_count']} band{'s' if cache['raster_count'] != 1 else ''})",
+    ]
+    if location_line:
+        info_lines.append(location_line)
+    info_lines.extend([
         "",
         _help_text(),
         "",
         _surface_prompt(),
     ])
+    info = "\n".join(info_lines)
     _refresh_out_of_bounds_node_cache(cache)
     out_of_bounds_note = _out_of_bounds_nodes_message(cache)
     if out_of_bounds_note:
@@ -1584,6 +1926,12 @@ def handle_raster_upload(file, cache):
         session = cache["session_info"]
         session["raster_bounds"] = cache["raster_bounds"]
         session["raster_crs"] = cache["raster_crs"]
+        session["raster_width"] = cache["raster_width"]
+        session["raster_height"] = cache["raster_height"]
+        session["raster_count"] = cache["raster_count"]
+        session["raster_resolution"] = cache["raster_resolution"]
+        session["raster_bounds_wgs84"] = cache["raster_bounds_wgs84"]
+        session["raster_centroid_wgs84"] = cache["raster_centroid_wgs84"]
     return ([{"role": "assistant", "content": info}], _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache)
 
 
@@ -1782,6 +2130,9 @@ def handle_chat(chat_history, user_message, cache):
                 session.pop("conversion_resistance_range", None)
                 session.pop("conversion_completed_at", None)
         else:
+            if intent is None:
+                yield from _handle_llm_fallback(chat_history, prior_history, user_message, cache)
+                return
             reminder = (
                 "Before we continue, I need to know what kind of surface the raster represents.\n"
                 + _surface_prompt()
@@ -2094,6 +2445,10 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     """
     <style>
     .gradio-container {
+        --spatchat-connect-bg: var(--body-background-fill, var(--background-fill-primary, #ffffff));
+    }
+
+    .gradio-container {
         max-width: 100% !important;
         padding-left: 4px !important;
         padding-right: 4px !important;
@@ -2286,6 +2641,12 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         background: transparent !important;
     }
 
+    #spatchat-user-input .block-label,
+    #spatchat-user-input .label-wrap,
+    #spatchat-user-input [data-testid="block-label"] {
+        display: none !important;
+    }
+
     #spatchat-user-input .input-container {
         align-items: center !important;
     }
@@ -2296,10 +2657,11 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         border: none !important;
         box-shadow: none !important;
         border-radius: var(--radius-md) !important;
-        min-height: 38px !important;
+        height: 48px !important;
+        min-height: 48px !important;
         box-sizing: border-box !important;
-        padding: 8px 12px !important;
-        line-height: 18px !important;
+        padding: 13px 12px !important;
+        line-height: 22px !important;
     }
 
     #spatchat-user-input textarea {
@@ -2331,20 +2693,72 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         background: transparent !important;
     }
 
-    /* Assistant: no bubble */
+    /* Assistant: no visible bubble */
     #spatchat-chatbot .message-row.bot,
     #spatchat-chatbot .message-row.assistant,
+    #spatchat-chatbot .message-row.bot-row,
+    #spatchat-chatbot .bubble.bot-row,
     #spatchat-chatbot [data-testid="chatbot-message-assistant"] {
-        background: transparent !important;
+        background: var(--spatchat-connect-bg) !important;
+        background-color: var(--spatchat-connect-bg) !important;
         justify-content: flex-start !important;
+    }
+
+    #spatchat-chatbot .message-row.bot-row,
+    #spatchat-chatbot .message-row.bot-row .flex-wrap,
+    #spatchat-chatbot .message-row.bot-row .message,
+    #spatchat-chatbot .message-row.bot-row .message-bubble-border,
+    #spatchat-chatbot .message-row.bot-row .bot,
+    #spatchat-chatbot .bubble.bot-row,
+    #spatchat-chatbot .bubble.bot-row .message,
+    #spatchat-chatbot .bubble.bot-row .message-bubble-border,
+    #spatchat-chatbot .bubble.bot-row .bot,
+    #spatchat-chatbot .bot,
+    #spatchat-chatbot .bot-row .message,
+    #spatchat-chatbot .bot-row .message-bubble-border,
+    #spatchat-chatbot .bot-row .bot,
+    #spatchat-chatbot .bubble.pending,
+    #spatchat-chatbot .bubble.pending .message-content {
+        background: var(--spatchat-connect-bg) !important;
+        background-color: var(--spatchat-connect-bg) !important;
+        border: none !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+
+    #spatchat-chatbot .message-row.bot-row .bot,
+    #spatchat-chatbot .message-row.bot-row,
+    #spatchat-chatbot .bubble.bot-row,
+    #spatchat-chatbot .bubble.bot-row .bot,
+    #spatchat-chatbot .bot,
+    #spatchat-chatbot .bot-row .bot,
+    #spatchat-chatbot .bubble.pending {
+        padding: 0 !important;
+        border-radius: 0 !important;
+    }
+
+    #spatchat-chatbot .message-row.bot .bubble-wrap,
+    #spatchat-chatbot .message-row.assistant .bubble-wrap,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] .bubble-wrap,
+    #spatchat-chatbot .message-row.bot .bubble,
+    #spatchat-chatbot .message-row.assistant .bubble,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] .bubble,
+    #spatchat-chatbot .message-row.bot .avatar-container,
+    #spatchat-chatbot .message-row.assistant .avatar-container,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] .avatar-container,
+    #spatchat-chatbot .message-row.bot .message,
+    #spatchat-chatbot .message-row.assistant .message,
+    #spatchat-chatbot [data-testid="chatbot-message-assistant"] .message {
+        background: var(--spatchat-connect-bg) !important;
+        border: none !important;
+        box-shadow: none !important;
+        outline: none !important;
     }
 
     #spatchat-chatbot .message-row.bot .message,
     #spatchat-chatbot .message-row.assistant .message,
     #spatchat-chatbot [data-testid="chatbot-message-assistant"] .message {
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
         padding: 0 !important;
         margin: 0 !important;
         max-width: 100% !important;
@@ -2590,7 +3004,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
             )
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
             user_input = gr.Textbox(
-                label="",
+                label=None,
+                show_label=False,
                 placeholder="Ask Spatchat...",
                 lines=1,
                 elem_id="spatchat-user-input",

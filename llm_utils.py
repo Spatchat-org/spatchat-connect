@@ -8,6 +8,7 @@ from together.error import InvalidRequestError, RateLimitError, ServiceUnavailab
 
 HF_MODEL_DEFAULT = "meta-llama/Llama-3.1-8B-Instruct"
 TOGETHER_MODEL_DEFAULT = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+ANSWER_MAX_TOKENS = 360
 
 
 def _load_local_env() -> None:
@@ -315,9 +316,19 @@ Your role:
 - Prefer app-oriented guidance such as uploading a raster, adding nodes, converting a surface, running least-cost paths, or running the graph workflow.
 
 You are given a JSON object called dataset_context with facts about the currently loaded inputs
-(e.g., whether a cost raster is present, nodes columns, small samples). When the user asks anything
-about the data, answer STRICTLY using dataset_context. If the answer is not present or cannot be
-derived from it, say you don't know and briefly suggest what the user could do to compute it.
+(e.g., raster CRS/bounds/dimensions/resolution, nodes columns/count/samples, and analysis result
+summaries or small result-table previews). When the user asks anything about the loaded data or
+analysis results, answer STRICTLY using dataset_context. If the answer is not present or cannot be
+derived from it, say you don't know and briefly suggest what the user could do to compute it. For
+questions about raster dimensions, use dataset_context.raster_dimensions and raster_resolution.
+For questions about where the study area is, use dataset_context.raster_location first: report the
+WGS84 centroid and/or bounds, and you may give a coarse approximate geographic description from
+those coordinates if it is obvious. Do not invent exact administrative names; say reverse geocoding
+or an administrative boundary lookup would be needed for an exact place name.
+For questions about result counts, metrics, or outputs, use dataset_context.analysis_results.
+For questions asking what a result layer, edge, metric, or output "means", use
+dataset_context.result_layer_meanings plus the current values in analysis_results. Explain the
+interpretation in plain language; do not just repeat the completion/status message.
 
 When the user requests an analysis, prefer to emit a TOOL CALL as a single, raw JSON object with:
   {
@@ -343,8 +354,10 @@ When the user requests an analysis, prefer to emit a TOOL CALL as a single, raw 
 
 Rules:
 - If you emit a tool call, output ONLY the JSON object, no prose.
+- Do not emit a tool call for questions asking about currently loaded data, metadata, previous outputs, or analysis results; answer from dataset_context instead.
 - If you are not sure which tool to call, ask a brief clarifying question (<= 2 sentences).
 - If no tool call is needed, answer naturally in <= 4 sentences.
+- Make every prose answer end on a complete sentence; keep it shorter rather than ending mid-thought.
 - For general topic questions, answer as a landscape ecologist first, then briefly connect the answer to a concrete action the user can take in this app when relevant.
 - If the user asks for something outside the app's supported workflows, say that plainly and redirect them to the closest supported workflow.
 - Do not fabricate numbers. Do not invent files or columns that aren't in dataset_context.
@@ -381,7 +394,7 @@ def ask_llm(chat_history, user_input, context=None):
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_input})
 
-    resp = _llm.chat(messages, temperature=0.0, max_tokens=160, stream=False)
+    resp = _llm.chat(messages, temperature=0.0, max_tokens=ANSWER_MAX_TOKENS, stream=False)
 
     # return (tool_dict_or_None, raw_text_output)
     call = _extract_json(resp)
@@ -398,4 +411,4 @@ def ask_llm_stream(chat_history, user_input, context=None):
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_input})
 
-    yield from _llm.stream_chat(messages, temperature=0.0, max_tokens=160)
+    yield from _llm.stream_chat(messages, temperature=0.0, max_tokens=ANSWER_MAX_TOKENS)
