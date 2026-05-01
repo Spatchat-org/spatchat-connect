@@ -2445,7 +2445,13 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     """
     <style>
     .gradio-container {
-        --spatchat-connect-bg: var(--body-background-fill, var(--background-fill-primary, #ffffff));
+        --spatchat-connect-bg: #f6f8fb;
+        --spatchat-chat-text: #131722;
+    }
+
+    .dark .gradio-container {
+        --spatchat-connect-bg: var(--body-background-fill, var(--background-fill-primary, #0f141d));
+        --spatchat-chat-text: var(--body-text-color, #edf2ff);
     }
 
     .gradio-container {
@@ -2550,6 +2556,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         height: 56vh !important;
         min-height: 56vh !important;
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-chat-text) !important;
         border: none !important;
         box-shadow: none !important;
         border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
@@ -2558,6 +2565,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
 
     #spatchat-chatbot > div {
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-chat-text) !important;
         border: none !important;
         box-shadow: none !important;
         border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
@@ -2763,13 +2771,14 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         margin: 0 !important;
         max-width: 100% !important;
         width: auto !important;
-        color: inherit !important;
+        color: var(--spatchat-chat-text) !important;
     }
 
     #spatchat-chatbot .message-row.bot .message *,
     #spatchat-chatbot .message-row.assistant .message *,
     #spatchat-chatbot [data-testid="chatbot-message-assistant"] .message * {
         background: transparent !important;
+        color: inherit !important;
     }
 
     /* User row aligned right */
