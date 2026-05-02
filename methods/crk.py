@@ -373,6 +373,10 @@ def compute_cumulative_resistant_kernel(
         arr = np.where(~traversable_mask, float(params.barrier_cost), arr)
 
         pixel_size = _estimate_pixel_size(transform)
+        # MCP_Geometric uses grid-step units (1 per axial move) rather than map units.
+        # Scale resistance by pixel size so accumulated path cost is in resistance*meters.
+        # With resistance ~= 1, user-entered bandwidth/cutoff in meters maps correctly.
+        arr = arr * float(pixel_size)
         sigma = float(bandwidth_meters)
 
         # Warn if CRS is not projected in meters; kernels assume meter units.

@@ -9,6 +9,10 @@
 # - SOURCE_TYPE: defaults to repro_config.json surface_type (fallback: resistance).
 # - TARGET_TYPE: defaults to repro_config.json conversion.target (fallback: resistance).
 # - SCALE_MODE / SCALE_RANGE: conversion scaling controls from repro_config.json conversion.
+#
+# NOTE:
+# - When TARGET_TYPE is resistance, this script also refreshes a conductance raster
+#   from the updated cost surface to mirror app behavior.
 
 import json
 import os
@@ -157,3 +161,13 @@ convert_surface(
 )
 
 print(f"Converted surface written to: {OUTPUT_PATH}")
+
+if TARGET_TYPE == "resistance":
+    conductance_path = os.path.join(OUTPUT_DIR, "converted_conductance_surface.tif")
+    convert_surface(
+        input_path=OUTPUT_PATH,
+        output_path=conductance_path,
+        src_type="resistance",
+        dst_type="conductance",
+    )
+    print(f"Conductance refreshed from converted cost: {conductance_path}")

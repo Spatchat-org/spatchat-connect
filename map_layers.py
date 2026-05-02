@@ -28,6 +28,7 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 from pyproj import Transformer
 from branca.element import MacroElement, Template
 from lcp_flow import detect_nodes_lonlat
+from crk_flow import KERNEL_PREVIEW_LABEL, kernel_preview_label
 
 try:
     import pandas as pd
@@ -2167,7 +2168,8 @@ def build_preview_from_cache(cache: Dict[str, Any]) -> str:
             except Exception:
                 label_override = cache.get("conversion_label")
         if input_raster and os.path.exists(input_raster) and os.path.abspath(input_raster) != os.path.abspath(analysis_cost_raster):
-            base_rasters.append((input_raster, input_label))
+            # Keep the original raster available for exports, but hide it from map overlays
+            # once a dedicated analysis cost surface exists.
             cost_label = label_override or "Converted cost surface"
         else:
             cost_label = label_override or input_label
@@ -2178,6 +2180,24 @@ def build_preview_from_cache(cache: Dict[str, Any]) -> str:
             if not path or not os.path.exists(path):
                 continue
             extra_rasters.append((path, label or "Converted surface"))
+    # Ensure CRK appears in Layer Control even if preview_rasters state is stale.
+    kernel_surface_tif = cache.get("kernel_surface_tif")
+    if kernel_surface_tif and os.path.exists(kernel_surface_tif):
+        kernel_distance = cache.get("kernel_dispersal_distance_m")
+        if kernel_distance is not None:
+            try:
+                kernel_label = kernel_preview_label(float(kernel_distance))
+            except Exception:
+                kernel_label = KERNEL_PREVIEW_LABEL
+        else:
+            kernel_label = KERNEL_PREVIEW_LABEL
+        already_listed = any(
+            os.path.abspath(path) == os.path.abspath(kernel_surface_tif)
+            for path, _ in extra_rasters
+            if path
+        )
+        if not already_listed:
+            extra_rasters.append((kernel_surface_tif, kernel_label))
 
     graph_metrics_df = cache.get("graph_metrics_df")
     graph_metric_names: List[str] = []

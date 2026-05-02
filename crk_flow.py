@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
+from pyproj import CRS
 
+from crs_utils import choose_meter_crs_for_raster, reproject_raster_to_crs
 from lcp_flow import detect_nodes_lonlat
 from methods.crk import CRKParams, compute_cumulative_resistant_kernel
 
@@ -30,6 +32,31 @@ def kernel_preview_label(dispersal_distance_m: float) -> str:
 def _auto_node_ids(count: int) -> list[str]:
     width = max(2, len(str(max(1, count))))
     return [f"node_{i:0{width}d}" for i in range(1, count + 1)]
+
+
+def _ensure_projected_cost_for_distance(
+    cache: Cache,
+    cost_path: str,
+) -> Tuple[str, Optional[str]]:
+    centroid = cache.get("raster_centroid_wgs84")
+    lon = lat = None
+    if isinstance(centroid, dict):
+        lon = centroid.get("longitude")
+        lat = centroid.get("latitude")
+    centroid_hint = (float(lon), float(lat)) if lon is not None and lat is not None else None
+    target_epsg = choose_meter_crs_for_raster(cost_path, centroid_hint=centroid_hint)
+    if not target_epsg:
+        return cost_path, None
+
+    converted_dir = cache.get("converted_dir") or os.path.dirname(cost_path)
+    base = os.path.splitext(os.path.basename(cost_path))[0]
+    projected_path = os.path.join(converted_dir, f"{base}_projected_epsg{target_epsg}.tif")
+    needs_refresh = (not os.path.exists(projected_path)) or (
+        os.path.getmtime(projected_path) < os.path.getmtime(cost_path)
+    )
+    if needs_refresh:
+        reproject_raster_to_crs(cost_path, projected_path, CRS.from_epsg(int(target_epsg)))
+    return projected_path, f"Auto-projected cost surface to EPSG:{target_epsg} for distance-based kernel analysis."
 
 
 def prepare_nodes_for_crk(cache: Cache) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[str], Optional[str], Optional[str]]:
@@ -102,9 +129,17 @@ def run_crk(
     )
     kernel_sigma_m = max(float(dispersal_distance_m) / 3.0, 1.0)
 
+    crk_cost_path = analysis_cost_path
+    projection_note = None
+    try:
+        crk_cost_path, projection_note = _ensure_projected_cost_for_distance(cache, analysis_cost_path)
+    except Exception:
+        crk_cost_path = analysis_cost_path
+        projection_note = None
+
     try:
         result = compute_cumulative_resistant_kernel(
-            cost_tif=analysis_cost_path,
+            cost_tif=crk_cost_path,
             nodes_df=nodes_df,
             bandwidth_meters=kernel_sigma_m,
             params=params,
@@ -158,6 +193,8 @@ def run_crk(
         f"Click \"Download Results\" to grab the outputs."
         f"{compact_note}"
     )
+    if projection_note:
+        message = f"{projection_note} {message}"
     return True, message, kernel_tif
 
 

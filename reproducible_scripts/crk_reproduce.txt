@@ -9,6 +9,10 @@
 # - OUTPUT_DIR: where reproduced outputs will be written.
 # - DISPERSAL_DISTANCE_M / KERNEL_SIGMA_M: CRK settings from repro_config.json crk.
 # - LON_COL / LAT_COL: node coordinate column names from repro_config.json.
+#
+# NOTE:
+# - If COST_TIF is geographic/non-meter CRS, this script auto-projects it to local UTM
+#   (from centroid lon/lat) before running CRK.
 
 import json
 import math
@@ -20,6 +24,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from pyproj import CRS, Transformer
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 from skimage.graph import MCP, MCP_Geometric
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
@@ -73,6 +78,60 @@ def _kernel_from_costs(costs, sigma, kernel, cutoff):
     return out
 
 
+def _needs_meter_projection(crs):
+    if crs is None:
+        return False
+    crs_obj = CRS.from_user_input(crs)
+    if not crs_obj.is_projected:
+        return True
+    units = {ai.unit_name.lower() for ai in crs_obj.axis_info if ai.unit_name}
+    if not units:
+        return False
+    return not any(("meter" in u) or ("metre" in u) for u in units)
+
+
+def _utm_epsg_from_lonlat(lon, lat):
+    zone = int(math.floor((float(lon) + 180.0) / 6.0) + 1)
+    zone = max(1, min(60, zone))
+    return (32600 if float(lat) >= 0.0 else 32700) + zone
+
+
+def _reproject_raster(src_path, dst_path, dst_epsg):
+    dst_crs = CRS.from_epsg(int(dst_epsg))
+    with rasterio.open(src_path) as src:
+        transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)
+        profile = src.profile.copy()
+        profile.update(crs=dst_crs, transform=transform, width=width, height=height)
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            for b in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, b),
+                    destination=rasterio.band(dst, b),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=src.nodata,
+                    dst_transform=transform,
+                    dst_crs=dst_crs,
+                    dst_nodata=src.nodata,
+                    resampling=Resampling.bilinear,
+                )
+
+
+def _ensure_projected_cost(cost_tif):
+    with rasterio.open(cost_tif) as ds:
+        if not _needs_meter_projection(ds.crs):
+            return cost_tif, None
+        cx = (float(ds.bounds.left) + float(ds.bounds.right)) / 2.0
+        cy = (float(ds.bounds.bottom) + float(ds.bounds.top)) / 2.0
+        to_wgs = Transformer.from_crs(ds.crs, "EPSG:4326", always_xy=True)
+        lon, lat = to_wgs.transform(cx, cy)
+        epsg = _utm_epsg_from_lonlat(lon, lat)
+    out_path = os.path.join(OUTPUT_DIR, f"projected_cost_epsg{epsg}.tif")
+    _reproject_raster(cost_tif, out_path, epsg)
+    return out_path, f"Auto-projected cost surface to EPSG:{epsg}"
+
+
 def compute_cumulative_resistant_kernel(cost_tif, nodes_df, bandwidth_meters, params, out_tif):
     with rasterio.open(cost_tif) as ds:
         arr = ds.read(1, masked=True).astype(np.float32 if params.use_float32 else np.float64, copy=False)
@@ -82,6 +141,8 @@ def compute_cumulative_resistant_kernel(cost_tif, nodes_df, bandwidth_meters, pa
         tr = ds.transform
         crs = ds.crs
         H, W = ds.height, ds.width
+        pixel_size = _estimate_pixel_size(tr)
+        arr = arr * float(pixel_size)
         if params.nodes_crs and crs and CRS.from_user_input(params.nodes_crs) != CRS.from_user_input(crs):
             to_raster = Transformer.from_crs(params.nodes_crs, crs, always_xy=True)
         else:
@@ -114,7 +175,7 @@ def compute_cumulative_resistant_kernel(cost_tif, nodes_df, bandwidth_meters, pa
         profile.update(dtype="float32" if params.use_float32 else "float64", count=1, nodata=None)
         with rasterio.open(out_tif, "w", **profile) as dst:
             dst.write(out.astype(profile["dtype"]), 1)
-    return {"sources_used": int(sum(src_counts.values())), "surface_path": out_tif, "pixel_size": _estimate_pixel_size(tr), "sources_skipped": skipped}
+    return {"sources_used": int(sum(src_counts.values())), "surface_path": out_tif, "pixel_size": pixel_size, "sources_skipped": skipped}
 
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -130,12 +191,19 @@ KERNEL_SIGMA_M = float(CRK.get("kernel_sigma_m") or max(DISPERSAL_DISTANCE_M / 3
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 nodes_df = pd.read_csv(NODES_CSV)
+if "node_id" not in nodes_df.columns:
+    nodes_df = nodes_df.copy()
+    nodes_df["node_id"] = [f"node_{i+1:02d}" for i in range(len(nodes_df))]
+
+cost_for_run, projection_note = _ensure_projected_cost(COST_TIF)
 result = compute_cumulative_resistant_kernel(
-    cost_tif=COST_TIF,
+    cost_tif=cost_for_run,
     nodes_df=nodes_df,
     bandwidth_meters=KERNEL_SIGMA_M,
     params=CRKParams(id_col="node_id", lon_col=LON_COL, lat_col=LAT_COL, cutoff=DISPERSAL_DISTANCE_M),
     out_tif=os.path.join(OUTPUT_DIR, "cumulative_resistant_kernel.tif"),
 )
+if projection_note:
+    print(projection_note)
 print(f"CRK output reproduced in: {OUTPUT_DIR}")
 print(f"Sources used: {result.get('sources_used')}")

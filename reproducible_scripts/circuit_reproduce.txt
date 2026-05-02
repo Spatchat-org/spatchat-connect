@@ -9,6 +9,10 @@
 # - OUTPUT_DIR: where reproduced outputs will be written.
 # - LON_COL / LAT_COL: node coordinate column names from repro_config.json.
 # - PARAMS: optional circuit settings can be edited in CircuitTheoryParams defaults.
+#
+# NOTE:
+# - If COST_TIF is geographic/non-meter CRS, this script auto-projects it to local UTM
+#   (from centroid lon/lat) before running circuit analysis.
 
 import json
 import math
@@ -21,6 +25,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from pyproj import CRS, Transformer
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 from rasterio.windows import Window
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
@@ -53,6 +58,60 @@ def _estimate_pixel_size(transform):
     sx = math.hypot(transform.a, transform.b)
     sy = math.hypot(transform.d, transform.e)
     return float((sx + sy) / 2.0) if sx and sy else float(sx or sy)
+
+
+def _needs_meter_projection(crs):
+    if crs is None:
+        return False
+    crs_obj = CRS.from_user_input(crs)
+    if not crs_obj.is_projected:
+        return True
+    units = {ai.unit_name.lower() for ai in crs_obj.axis_info if ai.unit_name}
+    if not units:
+        return False
+    return not any(("meter" in u) or ("metre" in u) for u in units)
+
+
+def _utm_epsg_from_lonlat(lon, lat):
+    zone = int(math.floor((float(lon) + 180.0) / 6.0) + 1)
+    zone = max(1, min(60, zone))
+    return (32600 if float(lat) >= 0.0 else 32700) + zone
+
+
+def _reproject_raster(src_path, dst_path, dst_epsg):
+    dst_crs = CRS.from_epsg(int(dst_epsg))
+    with rasterio.open(src_path) as src:
+        transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)
+        profile = src.profile.copy()
+        profile.update(crs=dst_crs, transform=transform, width=width, height=height)
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            for b in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, b),
+                    destination=rasterio.band(dst, b),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=src.nodata,
+                    dst_transform=transform,
+                    dst_crs=dst_crs,
+                    dst_nodata=src.nodata,
+                    resampling=Resampling.bilinear,
+                )
+
+
+def _ensure_projected_cost(cost_tif):
+    with rasterio.open(cost_tif) as ds:
+        if not _needs_meter_projection(ds.crs):
+            return cost_tif, None
+        cx = (float(ds.bounds.left) + float(ds.bounds.right)) / 2.0
+        cy = (float(ds.bounds.bottom) + float(ds.bounds.top)) / 2.0
+        to_wgs = Transformer.from_crs(ds.crs, "EPSG:4326", always_xy=True)
+        lon, lat = to_wgs.transform(cx, cy)
+        epsg = _utm_epsg_from_lonlat(lon, lat)
+    out_path = os.path.join(OUTPUT_DIR, f"projected_cost_epsg{epsg}.tif")
+    _reproject_raster(cost_tif, out_path, epsg)
+    return out_path, f"Auto-projected cost surface to EPSG:{epsg}"
 
 
 def _prepare_window(points, shape, margin):
@@ -183,6 +242,13 @@ LON_COL = CONFIG.get("nodes_lon_col") or "longitude"
 LAT_COL = CONFIG.get("nodes_lat_col") or "latitude"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 nodes_df = pd.read_csv(NODES_CSV)
-result = compute_effective_resistances(COST_TIF, nodes_df, CircuitTheoryParams(id_col="node_id", lon_col=LON_COL, lat_col=LAT_COL), OUTPUT_DIR)
+if "node_id" not in nodes_df.columns:
+    nodes_df = nodes_df.copy()
+    nodes_df["node_id"] = [f"node_{i+1:02d}" for i in range(len(nodes_df))]
+
+cost_for_run, projection_note = _ensure_projected_cost(COST_TIF)
+result = compute_effective_resistances(cost_for_run, nodes_df, CircuitTheoryParams(id_col="node_id", lon_col=LON_COL, lat_col=LAT_COL), OUTPUT_DIR)
+if projection_note:
+    print(projection_note)
 print(f"Circuit outputs reproduced in: {OUTPUT_DIR}")
 print(f"Pair count: {len(result.get('pairs', []))}")
