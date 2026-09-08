@@ -10,7 +10,7 @@ folium>=0.16,<0.17
 branca>=0.7,<0.8
 matplotlib>=3.8,<4
 
-rasterio>=1.5,<2
+rasterio>=1.4,<2
 pyproj>=3.7,<4
 shapely>=2.1,<3
 
