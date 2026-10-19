@@ -48,7 +48,8 @@ from branca.element import MacroElement, Template
 from map_layers import build_preview_from_cache
 from conversion_flow import conversion_prompt, process_conversion_chat, execute_surface_conversion, interpret_conversion_message
 from lcp_flow import detect_nodes_lonlat, run_lcp
-from crs_utils import suggest_node_columns, prepare_node_coordinates, parse_crs_input
+from coords_utils import suggest_node_columns, prepare_node_coordinates
+from crs_utils import parse_crs_input
 from graph_flow import run_graph_model
 from crk_flow import KERNEL_PREVIEW_LABEL, run_crk
 from cs_flow import CIRCUIT_PREVIEW_LABEL, run_circuit
@@ -1726,7 +1727,7 @@ def _help_text() -> str:
     return (
         "Hi, I'm SpatChat! This room helps you prepare landscape connectivity inputs and run connectivity analyses from a raster surface and optional node locations.\n\n"
         "Upload a raster (required): a GeoTIFF representing a landscape surface such as habitat suitability, resistance/cost, or conductance.\n"
-        "Upload nodes CSV (optional): point locations to connect or evaluate, such as habitat patches, source populations, detections, sampling sites, or restoration targets, with longitude/latitude columns.\n\n"
+        "Upload nodes CSV (optional): point locations to connect or evaluate, such as habitat patches, source populations, detections, sampling sites, or restoration targets, with geographic or projected coordinates.\n\n"
         "You can then ask for: \n"
         "• Cumulative resistant kernel (specify a dispersal distance)\n"
         "• Least‑cost paths / cost distance / corridors\n"
@@ -2018,7 +2019,7 @@ def handle_nodes_upload(file, chat_history, cache):
             _set_prepared_nodes(cache, prepared, "EPSG:4326", None)
             chat_history.append({"role": "assistant", "content":
                 f"Nodes uploaded. Detected WGS84 longitude/latitude ({x}, {y}). "
-                "Node IDs generated automatically. You can run connectivity analyses."})
+                "Node IDs are ready. You can run connectivity analyses."})
         except ValueError as exc:
             chat_history.append({"role": "assistant", "content":
                 f"Please confirm the coordinate columns and CRS: {exc}"})
@@ -2093,7 +2094,7 @@ def handle_chat(chat_history, user_message, cache):
     chat_history.append({"role": "user", "content": user_message})
     yield chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
 
-    if cache.get("nodes_crs_pending"):
+    if cache.get("nodes_crs_pending") and _detect_intents(msg):
         chat_history.append({"role": "assistant", "content":
             "Please confirm the uploaded nodes' coordinate columns and CRS before running connectivity analyses."})
         yield chat_history, gr.skip(), _download_update(cache), _status_clear_update(), cache
@@ -3037,7 +3038,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                 value=[
                     {
                         "role": "assistant",
-                        "content": "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\nUpload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\nOptionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, populations, detections, or sites, with longitude/latitude columns."
+                        "content": "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\nUpload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\nOptionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, populations, detections, or sites, with geographic or projected coordinates."
                     }
                 ],
                 elem_id="spatchat-chatbot",

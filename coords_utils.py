@@ -1,146 +1,130 @@
-# coords_utils.py
+"""Point coordinate helpers for Spatchat Connectivity (Home Range-style architecture)."""
 import re
-from typing import Optional, Tuple, List
-
 import numpy as np
 import pandas as pd
+from pyproj import CRS, Transformer
 from crs_utils import parse_crs_input
 
-try:
-    from pyproj import Transformer
-except Exception:  # pragma: no cover
-    Transformer = None  # type: ignore
 
-
-# ------------------------------------------------------------
-# Basic range checks (kept for consistency with Home Range)
-# ------------------------------------------------------------
 def looks_like_latlon(df: pd.DataFrame, x_col: str, y_col: str):
-    """Return 'lonlat' or 'latlon' if columns look like degrees; else None."""
+    """Check degree ranges, not a definitive CRS determination."""
     try:
-        x_vals = pd.to_numeric(df[x_col], errors="coerce")
-        y_vals = pd.to_numeric(df[y_col], errors="coerce")
-        if x_vals.between(-180, 180).all() and y_vals.between(-90, 90).all():
+        x = pd.to_numeric(df[x_col], errors="coerce")
+        y = pd.to_numeric(df[y_col], errors="coerce")
+        if not (x.notna().all() and y.notna().all()):
+            return None
+        if x.between(-180, 180).all() and y.between(-90, 90).all():
             return "lonlat"
-        if x_vals.between(-90, 90).all() and y_vals.between(-180, 180).all():
+        if x.between(-90, 90).all() and y.between(-180, 180).all():
             return "latlon"
-    except Exception:
-        return None
+    except (KeyError, TypeError, ValueError):
+        pass
     return None
 
 
 def looks_invalid_latlon(df: pd.DataFrame, lat_col: str, lon_col: str) -> bool:
-    """True if labeled lat/lon columns are out of bounds."""
     try:
         lat = pd.to_numeric(df[lat_col], errors="coerce")
         lon = pd.to_numeric(df[lon_col], errors="coerce")
-        return not (lat.between(-90, 90).all() and lon.between(-180, 180).all())
-    except Exception:
+        return not (lat.notna().all() and lon.notna().all()
+                    and lat.between(-90, 90).all() and lon.between(-180, 180).all())
+    except (KeyError, TypeError, ValueError):
         return True
 
 
-# ------------------------------------------------------------
-# Text level parsing (kept for parity; used elsewhere)
-# ------------------------------------------------------------
 def parse_levels_from_text(text: str):
-    """Extract % levels (clamp 100→99) with sane defaults."""
-    levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
-    levels = [min(l, 99) for l in levels]
-    return sorted(set(levels or [95]))
+    levels = [int(v) for v in re.findall(r"\b([1-9][0-9]?|100)\b", text)]
+    return sorted(set(min(v, 99) for v in (levels or [95])))
 
 
-# ------------------------------------------------------------
-# Connectivity-specific helpers
-# ------------------------------------------------------------
-_LON_NAMES = {"longitude", "lon", "long", "x"}
-_LAT_NAMES = {"latitude", "lat", "y"}
+def detect_lonlat_columns(df: pd.DataFrame):
+    x, y, confident = suggest_node_columns(df)
+    return (x, y) if confident else None
 
-def detect_lonlat_columns(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
+
+def ensure_wgs84_longlat(df, x_col, y_col, crs_text=None):
+    """Honor explicitly supplied CRS even if coordinates resemble degrees."""
+    if crs_text is None or not str(crs_text).strip():
+        if looks_like_latlon(df, x_col, y_col) != "lonlat":
+            raise ValueError("Specify the source CRS before transforming points.")
+        crs_text = "EPSG:4326"
+    return prepare_node_coordinates(df, x_col, y_col, crs_text)
+
+
+def suggest_node_columns(df):
+    """Return (x_column, y_column, confident_wgs84).
+
+    Numeric ranges alone never establish a CRS. Only explicitly named
+    geographic coordinate columns can be automatically accepted as WGS84.
     """
-    Heuristic detection of lon/lat columns in degrees.
-    1) Exact/common name matches
-    2) Value-range check on all numeric columns (tries both orders)
-    Returns (lon_col, lat_col) or None.
+    import pandas as pd
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None, None, False
+    names = {str(c).strip().lower(): c for c in df.columns}
+    for a, b in (("longitude", "latitude"), ("lon", "lat"), ("long", "lat")):
+        if a in names and b in names:
+            x, y = names[a], names[b]
+            xx = pd.to_numeric(df[x], errors="coerce")
+            yy = pd.to_numeric(df[y], errors="coerce")
+            valid = (xx.notna().all() and yy.notna().all()
+                     and xx.between(-180, 180).all() and yy.between(-90, 90).all())
+            return x, y, bool(valid)
+    for a, b in (("x", "y"), ("easting", "northing"), ("east", "north"),
+                 ("utm_x", "utm_y"), ("longitude", "latitude"), ("lon", "lat")):
+        if a in names and b in names:
+            return names[a], names[b], False
+    numeric = [c for c in df.columns if pd.to_numeric(df[c], errors="coerce").notna().all()]
+    return (numeric[0] if numeric else None,
+            numeric[1] if len(numeric) > 1 else None, False)
+
+
+def prepare_node_coordinates(df, x_col, y_col, source_crs, id_col=None):
+    """Return a copy with validated WGS84 longitude/latitude and unique node_id.
+
+    Preserve uploaded columns; original coordinate values are never overwritten
+    except when their names are already longitude/latitude (then values are
+    retained in source_longitude/source_latitude if reprojection is required).
     """
-    cols = list(df.columns)
-    low = {c.lower(): c for c in cols}
-
-    # 1) Name-based
-    lon_col = next((low[c] for c in _LON_NAMES if c in low), None)
-    lat_col = next((low[c] for c in _LAT_NAMES if c in low), None)
-    if lon_col and lat_col:
-        try:
-            lon_ok = pd.to_numeric(df[lon_col], errors="coerce").between(-180, 180).all()
-            lat_ok = pd.to_numeric(df[lat_col], errors="coerce").between(-90, 90).all()
-            if lon_ok and lat_ok:
-                return lon_col, lat_col
-        except Exception:
-            pass  # fall through to value-based
-
-    # 2) Value-based over numeric candidates
-    numeric_cols: List[str] = []
-    for c in cols:
-        s = pd.to_numeric(df[c], errors="coerce")
-        if s.notna().mean() >= 0.9:  # mostly numeric
-            numeric_cols.append(c)
-
-    for i, xc in enumerate(numeric_cols):
-        for yc in numeric_cols[i+1:]:
-            tag = looks_like_latlon(df, xc, yc)
-            if tag == "lonlat":
-                return xc, yc
-            if tag == "latlon":
-                return yc, xc
-    return None
-
-
-def ensure_wgs84_longlat(
-    df: pd.DataFrame,
-    x_col: str,
-    y_col: str,
-    crs_text: Optional[str] = None
-) -> pd.DataFrame:
-    """
-    Standardize to columns named 'longitude'/'latitude' in WGS84.
-    - If (x,y) already look like lon/lat in degrees, just rename/copy.
-    - Else require a CRS (e.g., 'EPSG:32633', '32633', 'UTM 33N') and reproject.
-    Raises ValueError if CRS is missing or pyproj is unavailable.
-    """
+    import pandas as pd
+    import numpy as np
+    if x_col not in df.columns or y_col not in df.columns or x_col == y_col:
+        raise ValueError("Select two distinct, existing X and Y columns.")
+    if id_col is not None and id_col not in df.columns:
+        raise ValueError("Selected node ID column is missing.")
+    xx = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
+    yy = pd.to_numeric(df[y_col], errors="coerce").to_numpy(dtype=float)
+    if not (np.isfinite(xx).all() and np.isfinite(yy).all()):
+        raise ValueError("X and Y columns must contain finite numeric values in every row.")
+    crs = CRS.from_user_input(parse_crs_input(source_crs) if isinstance(source_crs, str) else source_crs)
+    if not crs.is_geographic and not crs.is_projected:
+        raise ValueError("Use a geographic or projected coordinate reference system.")
+    lon, lat = Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform(xx, yy)
+    lon, lat = np.asarray(lon), np.asarray(lat)
+    if not (np.isfinite(lon).all() and np.isfinite(lat).all()
+            and np.all((lon >= -180) & (lon <= 180))
+            and np.all((lat >= -90) & (lat <= 90))):
+        raise ValueError("Coordinates transform outside valid longitude/latitude bounds. Check the CRS and X/Y selection.")
     out = df.copy()
-
-    # Case 1: already lon/lat (degrees)
-    tag = looks_like_latlon(out, x_col, y_col)
-    if tag == "lonlat":
-        out["longitude"] = pd.to_numeric(out[x_col], errors="coerce")
-        out["latitude"]  = pd.to_numeric(out[y_col], errors="coerce")
-        return out
-    if tag == "latlon":
-        out["longitude"] = pd.to_numeric(out[y_col], errors="coerce")
-        out["latitude"]  = pd.to_numeric(out[x_col], errors="coerce")
-        return out
-
-    # Case 2: need to transform projected X/Y → WGS84
-    if Transformer is None:
-        raise ValueError("pyproj is required to transform projected coordinates to WGS84.")
-
-    if not crs_text or not str(crs_text).strip():
-        raise ValueError(
-            "Coordinates do not look like lon/lat. Please specify a CRS/UTM zone "
-            "(e.g., 'EPSG:32610', '32610', 'UTM 10T')."
-        )
-
-    epsg_src = parse_crs_input(crs_text)  # may raise ValueError with a friendly tip
-    try:
-        transformer = Transformer.from_crs(epsg_src, 4326, always_xy=True)
-        x = pd.to_numeric(out[x_col], errors="coerce").values
-        y = pd.to_numeric(out[y_col], errors="coerce").values
-        lon, lat = transformer.transform(x, y)
-        out["longitude"] = lon
-        out["latitude"]  = lat
-    except Exception as e:
-        raise ValueError(f"Failed to convert coordinates: {e}")
-
-    # Final bounds check
-    if looks_invalid_latlon(out, "latitude", "longitude"):
-        raise ValueError("Reprojected coordinates are out of bounds; check CRS and X/Y selection.")
+    if crs != CRS.from_epsg(4326):
+        for col in ("longitude", "latitude"):
+            if col in out.columns:
+                original_name = f"source_{col}"
+                if original_name not in out.columns:
+                    out[original_name] = out[col]
+    out["longitude"] = lon
+    out["latitude"] = lat
+    if id_col is None:
+        if "node_id" in out.columns:
+            ids = out["node_id"].astype(str).str.strip()
+            if ids.ne("").all() and ids.is_unique and not ids.str.lower().isin({"nan", "none", "null"}).any():
+                return out
+        width = max(2, len(str(len(out))))
+        out["node_id"] = [f"node_{i:0{width}d}" for i in range(1, len(out) + 1)]
+    else:
+        ids = out[id_col].astype("string").str.strip()
+        if ids.isna().any() or ids.eq("").any() or ids.duplicated().any():
+            raise ValueError("Node identifiers must be nonempty and unique.")
+        if id_col != "node_id" and "node_id" in out.columns:
+            out["source_node_id"] = out["node_id"]
+        out["node_id"] = ids.astype(str)
     return out
