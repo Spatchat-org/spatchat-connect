@@ -57,6 +57,7 @@ from pyproj import CRS, Transformer
 from scipy.sparse import coo_matrix, csc_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import splu
+from crs_utils import validate_metric_analysis_raster
 
 
 @dataclass
@@ -80,7 +81,7 @@ class CircuitTheoryParams:
 
 def _xy_to_rc(transform: Affine, x: float, y: float) -> tuple[int, int]:
     col, row = (~transform) * (x, y)
-    return int(math.floor(row + 0.5)), int(math.floor(col + 0.5))
+    return int(math.floor(row)), int(math.floor(col))
 
 
 def _estimate_pixel_size(transform: Affine) -> float:
@@ -421,6 +422,7 @@ def compute_effective_resistances(
         if col not in nodes_df.columns:
             raise ValueError(f"nodes_df must contain column '{col}'")
 
+    validate_metric_analysis_raster(cost_tif)
     with rasterio.open(cost_tif) as ds:
         raster_crs = ds.crs
         raster_shape = (ds.height, ds.width)
@@ -451,7 +453,7 @@ def compute_effective_resistances(
         window_transform = ds.window_transform(window)
 
     arr_filled = np.array(arr.filled(np.nan), dtype=np.float64)
-    valid_mask = np.isfinite(arr_filled) & (arr_filled < params.barrier_cost)
+    valid_mask = np.isfinite(arr_filled) & (arr_filled > 0) & (arr_filled < params.barrier_cost)
 
     if not np.any(valid_mask):
         raise ValueError("No traversable cells within the cropped raster window.")

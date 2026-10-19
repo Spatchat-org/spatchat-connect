@@ -48,6 +48,7 @@ except Exception:  # pragma: no cover - optional dependency
 from rasterio.transform import Affine
 from pyproj import CRS, Transformer
 from skimage.graph import MCP, MCP_Geometric
+from crs_utils import validate_metric_analysis_raster
 
 __all__ = [
     "CRKParams",
@@ -174,8 +175,8 @@ def ask_for_bandwidth(
 
 def _xy_to_rc(transform: Affine, x: float, y: float) -> tuple[int, int]:
     col, row = (~transform) * (x, y)
-    r = int(math.floor(row + 0.5))
-    c = int(math.floor(col + 0.5))
+    r = int(math.floor(row))
+    c = int(math.floor(col))
     return r, c
 
 
@@ -358,19 +359,20 @@ def compute_cumulative_resistant_kernel(
     if not os.path.exists(cost_tif):
         raise FileNotFoundError(cost_tif)
 
+    validate_metric_analysis_raster(cost_tif)
     with rasterio.open(cost_tif) as ds:
         raster_crs = ds.crs
         transform = ds.transform
         nodata = ds.nodata
         height, width = ds.height, ds.width
 
-        arr = ds.read(1, masked=True)
-        arr = arr.astype(np.float32 if params.use_float32 else np.float64, copy=False)
-        if nodata is not None:
-            arr = np.where(arr == nodata, np.nan, arr)
-        arr = np.where(~np.isfinite(arr), np.nan, arr)
-        traversable_mask = np.isfinite(arr)
-        arr = np.where(~traversable_mask, float(params.barrier_cost), arr)
+        masked = ds.read(1, masked=True)
+        arr = np.asarray(masked.filled(np.nan), dtype=np.float64)
+        traversable_mask = np.isfinite(arr) & (arr > 0) & (arr < params.barrier_cost)
+        if not np.any(traversable_mask):
+            raise ValueError("Resistance raster has no finite positive traversable cells.")
+        # Inf is impassable to the graph solver; never cross NoData barriers.
+        arr = np.where(traversable_mask, arr, np.inf)
 
         pixel_size = _estimate_pixel_size(transform)
         # MCP_Geometric uses grid-step units (1 per axial move) rather than map units.
