@@ -80,9 +80,16 @@ def run_graph_model(cache: Cache, output_dir: str, job_id: str, *, ensure_lcp: O
     filtered_edges, decay_summary = _build_probability_decay_graph(edges)
     if filtered_edges.empty:
         return False, "Graph model failed because probability decay removed every edge.", None
-    params = GraphAnalysisParams(distance_col="cost" if "cost" in filtered_edges.columns else None, strength_col="probability" if "probability" in filtered_edges.columns else None)
+    params = GraphAnalysisParams(
+        distance_col="cost" if "cost" in filtered_edges.columns else None,
+        strength_col="probability" if "probability" in filtered_edges.columns else None,
+    )
+    if "node_id" not in nodes_df.columns:
+        return False, "Prepared nodes are missing node_id; confirm coordinates and upload again.", None
+    node_ids = nodes_df["node_id"].dropna().astype(str).str.strip()
+    node_ids = node_ids[node_ids != ""].drop_duplicates().tolist()
     try:
-        result = run_graph_theory_analysis(filtered_edges, params=params)
+        result = run_graph_theory_analysis(filtered_edges, params=params, all_node_ids=node_ids)
     except Exception as exc:
         return False, f"Graph model failed: {exc}", None
     node_metrics = result.get("node_metrics")
@@ -95,11 +102,12 @@ def run_graph_model(cache: Cache, output_dir: str, job_id: str, *, ensure_lcp: O
         node_metrics = node_metrics.rename(columns={"index": "node_id"})
     lon_col, lat_col = cache.get("nodes_lon_col"), cache.get("nodes_lat_col")
     if (lon_col in nodes_df.columns and lat_col in nodes_df.columns and "node_id" in nodes_df.columns and "node_id" in node_metrics.columns):
-        coords_df = nodes_df[["node_id", lon_col, lat_col]].copy().rename(columns={lon_col: "x", lat_col: "y"})
+        coords_df = nodes_df[["node_id", lon_col, lat_col]].copy().rename(columns={lon_col: "longitude", lat_col: "latitude"})
         coords_df["node_id"] = coords_df["node_id"].astype("string")
         node_metrics["node_id"] = node_metrics["node_id"].astype("string")
         # Ensure a single coordinate row per node, avoiding accidental one-to-many joins.
         coords_df = coords_df.drop_duplicates(subset=["node_id"], keep="first")
+        node_metrics = node_metrics.drop(columns=["longitude", "latitude"], errors="ignore")
         node_metrics = node_metrics.merge(coords_df, on="node_id", how="left", validate="one_to_one")
     metric_ranges = _metric_ranges(node_metrics)
     metric_preference = ("betweenness", "pagerank", "closeness", "degree", "clustering")

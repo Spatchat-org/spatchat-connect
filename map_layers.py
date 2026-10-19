@@ -1023,7 +1023,7 @@ def _add_layer_control_sort_patch(m: folium.Map) -> None:
     if getattr(root, "_spatchat_layer_sort_patch_added", False):
         return
     setattr(root, "_spatchat_layer_sort_patch_added", True)
-    patch_html = """
+    patch_html = r"""
     {% macro html(this, kwargs) %}
     <style>
       .spatchat-layer-order-handle {
@@ -1684,7 +1684,7 @@ def _build_node_marker_features(
         features.append(
             {
                 "location": [lat, lon],
-                "radius": 6,
+                "radius": 7,
                 "color": "#ffffff",
                 "weight": 2,
                 "fillColor": "#3d8cff",
@@ -1752,68 +1752,47 @@ def make_graph_metric_layer(
     show: bool = True,
     pane: Optional[str] = None,
 ) -> Optional[Tuple[folium.map.FeatureGroup, float, float]]:
+    """Use original node WGS84 locations and centered, fixed-size CircleMarkers."""
     if nodes_df is None or metrics_df is None or metric_col not in metrics_df.columns:
         return None
-
     metrics_id_col = "node_id" if "node_id" in metrics_df.columns else "node"
     if metrics_id_col not in metrics_df.columns:
         return None
-
-    joined = nodes_df.merge(metrics_df, left_on=id_col, right_on=metrics_id_col, how="inner")
-    if joined.empty:
+    if not {id_col, lon_col, lat_col}.issubset(nodes_df.columns):
         return None
 
-    values = pd.to_numeric(joined[metric_col], errors="coerce")
-    valid = values[np.isfinite(values)]
+    # Do not merge coordinates from metrics: source-of-truth is uploaded nodes.
+    locations = nodes_df[[id_col, lon_col, lat_col]].copy()
+    locations["_join_id"] = locations[id_col].astype(str).str.strip()
+    locations = locations.drop_duplicates("_join_id", keep="first")
+    metrics = metrics_df[[metrics_id_col, metric_col]].copy()
+    metrics["_join_id"] = metrics[metrics_id_col].astype(str).str.strip()
+    metrics = metrics.drop_duplicates("_join_id", keep="first")
+    joined = locations.merge(metrics[["_join_id", metric_col]], on="_join_id", how="left", validate="one_to_one")
+    vals = pd.to_numeric(joined[metric_col], errors="coerce")
+    valid = vals[np.isfinite(vals)]
     if valid.empty:
         return None
-
-    vmin = float(valid.min())
-    vmax = float(valid.max())
-    span = max(vmax - vmin, 1e-12)
+    vmin, vmax = float(valid.min()), float(valid.max())
+    span = vmax - vmin
     cmap = plt.get_cmap("plasma")
     layer = folium.FeatureGroup(name=name or f"Graph model ({metric_col})", show=show)
-
-    for idx, row in joined.iterrows():
+    for _, row in joined.iterrows():
         try:
-            val = float(row[metric_col])
-            if not np.isfinite(val):
-                continue
-            lat = float(row[lat_col])
-            lon = float(row[lon_col])
-        except Exception:
+            val = float(row[metric_col]); lat = float(row[lat_col]); lon = float(row[lon_col])
+        except (TypeError, ValueError):
             continue
-        norm = (val - vmin) / span
-        color = _rgba_to_hex(cmap(norm))
-        radius = 5.0 + 7.0 * norm
-        tooltip = f"{row[id_col]}<br>{metric_col}: {_format_value(val)}"
-        diameter = int(round(radius * 2.0))
-        border = max(2, int(round(radius * 0.28)))
-        icon_html = (
-            '<div style="'
-            f'width:{diameter}px;'
-            f'height:{diameter}px;'
-            f'margin-left:-{diameter / 2.0:.1f}px;'
-            f'margin-top:-{diameter / 2.0:.1f}px;'
-            'border-radius:50%;'
-            f'background:{color};'
-            f'border:{border}px solid rgba(255,255,255,0.9);'
-            'box-shadow:0 0 0 1px rgba(0,0,0,0.2);'
-            'opacity:0.92;'
-            '"></div>'
-        )
-        folium.Marker(
-            location=[lat, lon],
-            tooltip=tooltip,
-            icon=folium.DivIcon(
-                html=icon_html,
-                icon_size=(diameter, diameter),
-                icon_anchor=(diameter / 2.0, diameter / 2.0),
-                class_name="",
-            ),
+        if not all(np.isfinite(v) for v in (val, lat, lon)):
+            continue
+        norm = (val - vmin) / span if span > 1e-12 else 0.5
+        color = _rgba_to_hex(cmap(float(np.clip(norm, 0.0, 1.0))))
+        folium.CircleMarker(
+            location=[lat, lon], radius=7,
+            color="#ffffff", weight=2,
+            fill=True, fill_color=color, fill_opacity=1.0,
+            tooltip=f"{row[id_col]} | {metric_col}: {_format_value(val)}",
             pane=pane,
         ).add_to(layer)
-
     return layer, vmin, vmax
 
 
@@ -2209,16 +2188,9 @@ def build_preview_from_cache(cache: Dict[str, Any]) -> str:
             if metric_name in graph_metrics_df.columns:
                 graph_metric_names.append(metric_name)
 
+    # All map layers use the same original WGS84 node coordinates.
+    # LCP computation may snap to raster cells internally, but markers do not.
     preview_nodes_df = df
-    if preview_nodes_df is not None:
-        snap_raster = analysis_cost_raster if analysis_cost_raster and os.path.exists(analysis_cost_raster) else input_raster
-        preview_nodes_df = _snap_nodes_to_raster_centers(
-            preview_nodes_df,
-            raster_path=snap_raster,
-            id_col="node_id",
-            lon_col=lon_col or "longitude",
-            lat_col=lat_col or "latitude",
-        )
 
     return build_connectivity_map(
         preview_nodes_df,
