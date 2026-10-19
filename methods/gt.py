@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Sequence
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 try:
@@ -78,7 +79,7 @@ def _coerce_weight(value: object) -> Optional[float]:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    if pd.isna(out):
+    if not np.isfinite(out):
         return None
     return out
 
@@ -108,6 +109,9 @@ def _prepare_graph(edges: pd.DataFrame, params: GraphAnalysisParams) -> nx.Graph
             needed_cols.append(strength_col)
         for row in edges[needed_cols].itertuples(index=False, name=None):
             src, dst = row[0], row[1]
+            if pd.isna(src) or pd.isna(dst) or not str(src).strip() or not str(dst).strip():
+                continue
+            src, dst = str(src), str(dst)
             attrs: dict[str, float] = {}
             idx = 2
             if use_distance:
@@ -125,11 +129,11 @@ def _prepare_graph(edges: pd.DataFrame, params: GraphAnalysisParams) -> nx.Graph
             G.add_edges_from(records)
         else:
             G.add_edges_from(
-                edges[[params.source_col, params.target_col]].itertuples(index=False, name=None)
+                ((str(src), str(dst)) for src, dst in edges[[params.source_col, params.target_col]].itertuples(index=False, name=None) if pd.notna(src) and pd.notna(dst) and str(src).strip() and str(dst).strip())
             )
     else:
         G.add_edges_from(
-            edges[[params.source_col, params.target_col]].itertuples(index=False, name=None)
+            ((str(src), str(dst)) for src, dst in edges[[params.source_col, params.target_col]].itertuples(index=False, name=None) if pd.notna(src) and pd.notna(dst) and str(src).strip() and str(dst).strip())
         )
 
     return G
