@@ -1,16 +1,13 @@
-"""Cumulative resistant kernel workflow helpers."""
+"""Cumulative resistant kernel workflow with shared metric raster preparation."""
 from __future__ import annotations
-
 import json
 import math
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
-
 import pandas as pd
-from pyproj import CRS
-
-from crs_utils import choose_meter_crs_for_raster, reproject_raster_to_crs
+from rasterio.warp import Resampling
+from crs_utils import prepare_metric_analysis_raster
 from lcp_flow import detect_nodes_lonlat
 from methods.crk import CRKParams, compute_cumulative_resistant_kernel
 
@@ -34,123 +31,65 @@ def _auto_node_ids(count: int) -> list[str]:
     return [f"node_{i:0{width}d}" for i in range(1, count + 1)]
 
 
-def _ensure_projected_cost_for_distance(
-    cache: Cache,
-    cost_path: str,
-) -> Tuple[str, Optional[str]]:
-    centroid = cache.get("raster_centroid_wgs84")
-    lon = lat = None
-    if isinstance(centroid, dict):
-        lon = centroid.get("longitude")
-        lat = centroid.get("latitude")
-    centroid_hint = (float(lon), float(lat)) if lon is not None and lat is not None else None
-    target_epsg = choose_meter_crs_for_raster(cost_path, centroid_hint=centroid_hint)
-    if not target_epsg:
-        return cost_path, None
-
-    converted_dir = cache.get("converted_dir") or os.path.dirname(cost_path)
-    base = os.path.splitext(os.path.basename(cost_path))[0]
-    projected_path = os.path.join(converted_dir, f"{base}_projected_epsg{target_epsg}.tif")
-    needs_refresh = (not os.path.exists(projected_path)) or (
-        os.path.getmtime(projected_path) < os.path.getmtime(cost_path)
-    )
-    if needs_refresh:
-        reproject_raster_to_crs(cost_path, projected_path, CRS.from_epsg(int(target_epsg)))
-    return projected_path, f"Auto-projected cost surface to EPSG:{target_epsg} for distance-based kernel analysis."
-
-
 def prepare_nodes_for_crk(cache: Cache) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[str], Optional[str], Optional[str]]:
     nodes_df = cache.get("nodes_df")
     if not isinstance(nodes_df, pd.DataFrame) or nodes_df.empty:
         return None, None, None, None, "Upload a nodes CSV before running a cumulative resistant kernel."
-
     guess = detect_nodes_lonlat(nodes_df)
     if not guess:
         return None, None, None, None, "Could not detect longitude/latitude columns in the nodes CSV."
-
     lon_col, lat_col = guess
     df = nodes_df.copy()
-    if len(df) < 1:
-        return None, None, None, None, "Need at least one node to compute a cumulative resistant kernel."
-
     if "node_id" not in df.columns:
-        df = df.copy()
         df["node_id"] = _auto_node_ids(len(df))
-
     cache["nodes_lon_col"] = lon_col
     cache["nodes_lat_col"] = lat_col
     return df, "node_id", lon_col, lat_col, None
 
 
-def run_crk(
-    cache: Cache,
-    output_dir: str,
-    job_id: str,
-    dispersal_distance_m: float,
-) -> Tuple[bool, str, Optional[str]]:
+def run_crk(cache: Cache, output_dir: str, job_id: str, dispersal_distance_m: float) -> Tuple[bool, str, Optional[str]]:
     if not cache.get("raster_path"):
         return False, "Upload a raster surface before running a cumulative resistant kernel.", None
-
+    if not math.isfinite(float(dispersal_distance_m)) or float(dispersal_distance_m) <= 0:
+        return False, "Dispersal distance must be a positive finite value.", None
     nodes_df, id_col, lon_col, lat_col, error = prepare_nodes_for_crk(cache)
     if error:
         return False, error, None
-
     surface_type = cache.get("surface_type") or "resistance"
     source_raster = cache.get("raster_path")
     analysis_cost_path = cache.get("analysis_cost_tif")
     if analysis_cost_path and not os.path.exists(analysis_cost_path):
         analysis_cost_path = None
-
     if surface_type in ("suitability", "conductance"):
         if not analysis_cost_path:
-            return (
-                False,
-                "Please convert the raster to a cost surface first before running a cumulative resistant kernel.",
-                None,
-            )
+            return False, "Please convert the raster to a cost surface first before running a cumulative resistant kernel.", None
     else:
         analysis_cost_path = analysis_cost_path or source_raster
-
     if not analysis_cost_path or not os.path.exists(analysis_cost_path):
         return False, "Cost surface not found. Try converting again before running the kernel.", None
-
     cache["analysis_cost_tif"] = analysis_cost_path
-
     job_dir = os.path.join(output_dir, job_id)
     os.makedirs(job_dir, exist_ok=True)
     kernel_tif = os.path.join(job_dir, "cumulative_resistant_kernel.tif")
     summary_json = os.path.join(job_dir, "crk_summary.json")
-
-    params = CRKParams(
-        id_col=id_col,
-        lon_col=lon_col,
-        lat_col=lat_col,
-        cutoff=float(dispersal_distance_m),
-    )
+    params = CRKParams(id_col=id_col, lon_col=lon_col, lat_col=lat_col,
+                       cutoff=float(dispersal_distance_m))
     kernel_sigma_m = max(float(dispersal_distance_m) / 3.0, 1.0)
-
-    crk_cost_path = analysis_cost_path
-    projection_note = None
     try:
-        crk_cost_path, projection_note = _ensure_projected_cost_for_distance(cache, analysis_cost_path)
-    except Exception:
-        crk_cost_path = analysis_cost_path
-        projection_note = None
-
-    try:
+        metric_path, metadata = prepare_metric_analysis_raster(
+            analysis_cost_path, os.path.join(output_dir, "_metric_grid_cache"),
+            resampling=Resampling.nearest)
         result = compute_cumulative_resistant_kernel(
-            cost_tif=crk_cost_path,
-            nodes_df=nodes_df,
-            bandwidth_meters=kernel_sigma_m,
-            params=params,
-            out_tif=kernel_tif,
-            return_surface=False,
-        )
+            cost_tif=metric_path, nodes_df=nodes_df, bandwidth_meters=kernel_sigma_m,
+            params=params, out_tif=kernel_tif, return_surface=False)
     except Exception as exc:
         return False, f"Cumulative resistant kernel failed: {exc}", None
-
+    cache["crk_analysis_cost_tif"] = metric_path
+    cache["crk_crs_metadata"] = metadata
     summary = {
         "kernel_surface_tif": kernel_tif,
+        "analysis_cost_tif": metric_path,
+        "crs_preparation": metadata,
         "dispersal_distance_m": float(dispersal_distance_m),
         "kernel_sigma_m": float(kernel_sigma_m),
         "pixel_size_m": result.get("pixel_size"),
@@ -165,7 +104,6 @@ def run_crk(
             json.dump(summary, f, indent=2)
     except Exception:
         summary_json = None
-
     preview_rasters = cache.get("preview_rasters")
     if not isinstance(preview_rasters, dict):
         preview_rasters = {}
@@ -175,32 +113,23 @@ def run_crk(
     cache["kernel_summary_json"] = summary_json
     cache["download_bundle_dirty"] = True
     cache["results_zip_path"] = None
-
     pixel_size_m = result.get("pixel_size")
-    compact_note = ""
     try:
         pixel_size_m = float(pixel_size_m) if pixel_size_m is not None else None
     except Exception:
         pixel_size_m = None
-    if pixel_size_m and dispersal_distance_m <= (3.0 * pixel_size_m):
-        compact_note = (
-            f" The raster cell size is about {pixel_size_m:.0f} m, so kernels at this distance will appear compact on the map."
-        )
-
+    compact_note = ""
+    if pixel_size_m and dispersal_distance_m <= 3 * pixel_size_m:
+        compact_note = f" The raster cell size is about {pixel_size_m:.0f} m, so kernels at this distance will appear compact on the map."
     message = (
         f"Cumulative resistant kernel complete using a dispersal distance of {dispersal_distance_m:g} meters "
-        f"(treated as the cutoff distance). The map now shows the kernel layer by default. "
-        f"Click \"Download Results\" to grab the outputs."
+        "(treated as the resistance-weighted cost-distance cutoff). "
+        "The map now shows the kernel layer by default. Click \"Download Results\" to grab the outputs."
         f"{compact_note}"
     )
-    if projection_note:
-        message = f"{projection_note} {message}"
+    if metadata.get("reprojected"):
+        message = f"Prepared metric analysis grid ({metadata['analysis_crs']}). {message}"
     return True, message, kernel_tif
 
 
-__all__ = [
-    "KERNEL_PREVIEW_LABEL",
-    "kernel_preview_label",
-    "prepare_nodes_for_crk",
-    "run_crk",
-]
+__all__ = ["KERNEL_PREVIEW_LABEL", "kernel_preview_label", "prepare_nodes_for_crk", "run_crk"]

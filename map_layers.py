@@ -67,7 +67,9 @@ def _hash_color(key: str) -> str:
 
 def _raster_bounds_wgs84(ds: rasterio.io.DatasetReader) -> List[List[float]]:
     b = ds.bounds
-    src_crs = ds.crs.to_string() if ds.crs else "EPSG:4326"
+    if ds.crs is None:
+        raise ValueError("Raster CRS is missing; cannot compute geographic bounds.")
+    src_crs = ds.crs.to_string()
     if src_crs != "EPSG:4326":
         to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
         pts = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
@@ -85,7 +87,9 @@ def _read_raster_preview_wgs84(
     resampling: Resampling = Resampling.bilinear,
 ) -> Tuple[np.ndarray, List[List[float]]]:
     arr = src.read(1, masked=True).astype(np.float32, copy=False).filled(np.nan)
-    if src.crs is None or str(src.crs).upper() == "EPSG:4326":
+    if src.crs is None:
+        raise ValueError("Raster CRS is missing; assign the correct CRS before mapping.")
+    if src.crs.to_epsg() == 4326:
         west, south, east, north = array_bounds(src.height, src.width, src.transform)
         return arr, [[south, west], [north, east]]
 
@@ -149,31 +153,29 @@ def _rgba_from_array(
     transform: Optional[str] = None,
     transparent_below: Optional[float] = None,
 ) -> Tuple[np.ndarray, float, float, float, float]:
-    """Percentile stretch to 0..1 then map to RGBA uint8 (A preserved)."""
+    """Percentile stretch over valid cells only; NoData remains transparent."""
     arr = np.asarray(arr, dtype=np.float32)
-    alpha_mask = np.isfinite(arr)
-    alpha_values = np.nan_to_num(arr, nan=0.0)
-    arr = np.nan_to_num(arr, nan=0.0)
+    valid = np.isfinite(arr)
+    if transparent_below is not None:
+        valid &= arr > float(transparent_below)
+    if not np.any(valid):
+        return (np.zeros((*arr.shape, 4), dtype=np.uint8),
+                float('nan'), float('nan'), float('nan'), float('nan'))
+    display = np.where(np.isfinite(arr), arr, 0.0)
     if transform == "log1p":
-        arr = np.log1p(np.maximum(arr, 0.0))
-    if not np.isfinite(arr).any():
-        rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
-        return rgba, float("nan"), float("nan"), float("nan"), float("nan")
-    actual_min = float(np.nanmin(arr))
-    actual_max = float(np.nanmax(arr))
-    lo = float(np.nanpercentile(arr, pmin))
-    hi = float(np.nanpercentile(arr, pmax))
+        display = np.log1p(np.maximum(display, 0.0))
+    values = display[valid]
+    actual_min, actual_max = float(values.min()), float(values.max())
+    lo, hi = float(np.percentile(values, pmin)), float(np.percentile(values, pmax))
     if hi <= lo:
         lo, hi = actual_min, actual_max
-        if hi <= lo:
-            rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
-            return rgba, lo, hi, actual_min, actual_max
-    arr = np.clip((arr - lo) / (hi - lo + 1e-12), 0.0, 1.0)
-    cmap = plt.get_cmap(cmap_name)
-    rgba = (cmap(arr) * 255).astype(np.uint8)
-    if transparent_below is not None:
-        alpha_mask &= alpha_values > float(transparent_below)
-    rgba[..., 3] = np.where(alpha_mask, rgba[..., 3], 0).astype(np.uint8)
+    if hi <= lo:
+        # Constant valid surface: use a consistent middle colormap value.
+        normalized = np.full(arr.shape, 0.5, dtype=np.float32)
+    else:
+        normalized = np.clip((display - lo) / (hi - lo), 0.0, 1.0)
+    rgba = (plt.get_cmap(cmap_name)(normalized) * 255).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, rgba[..., 3], 0).astype(np.uint8)
     return rgba, lo, hi, actual_min, actual_max
 
 
@@ -1637,7 +1639,8 @@ def _add_geotiff_overlay(
                 actual_max=actual_max,
             )
             return layer
-    except Exception:
+    except Exception as exc:
+        print(f"[map] Raster overlay failed for {name!r}: {exc}")
         return None
 
 

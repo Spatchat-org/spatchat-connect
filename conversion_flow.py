@@ -243,6 +243,24 @@ def execute_surface_conversion(
     cache["awaiting_conversion_choice"] = False
     cache["download_bundle_dirty"] = True
     cache["results_zip_path"] = None
+    # Previously computed outputs refer to the old resistance values.
+    # Invalidate downstream products and their preview layers.
+    for stale_key in (
+        "lcp_geojsonl", "lcp_index_csv", "lcp_unreachable_csv", "lcp_count_tif",
+        "lcp_cost_matrix", "lcp_zip_path", "lcp_analysis_metric_tif", "lcp_crs_metadata",
+        "kernel_surface_tif", "kernel_summary_json", "crk_analysis_cost_tif", "crk_crs_metadata",
+        "circuit_pairs_csv", "circuit_pairs_df", "circuit_unplaced_csv",
+        "circuit_summary_json", "circuit_current_density_tif", "circuit_analysis_cost_tif",
+        "circuit_crs_metadata", "graph_metrics_csv", "graph_metrics_df",
+        "graph_metric_name", "graph_edges_df", "graph_metric_ranges", "graph_probability_decay",
+        "graph_summary_json",
+    ):
+        cache[stale_key] = None
+    cache["preview_rasters"] = {
+        key: path for key, path in cache.get("preview_rasters", {}).items()
+        if not (key.startswith("Cumulative resistant kernel") or key == "Circuit current density"
+                or "LCP Density" in key)
+    }
 
     session = cache.get("session_info")
     if isinstance(session, dict):

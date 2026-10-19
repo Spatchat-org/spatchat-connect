@@ -9,7 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 from pyproj import CRS
 
-from crs_utils import choose_meter_crs_for_raster, reproject_raster_to_crs
+from crs_utils import prepare_metric_analysis_raster
+from rasterio.warp import Resampling
 from lcp_flow import detect_nodes_lonlat
 from methods.cs import CircuitTheoryParams, compute_effective_resistances
 
@@ -23,29 +24,15 @@ def _auto_node_ids(count: int) -> list[str]:
     return [f"node_{i:0{width}d}" for i in range(1, count + 1)]
 
 
-def _ensure_projected_cost_for_distance(
-    cache: Cache,
-    cost_path: str,
-) -> Tuple[str, Optional[str]]:
-    centroid = cache.get("raster_centroid_wgs84")
-    lon = lat = None
-    if isinstance(centroid, dict):
-        lon = centroid.get("longitude")
-        lat = centroid.get("latitude")
-    centroid_hint = (float(lon), float(lat)) if lon is not None and lat is not None else None
-    target_epsg = choose_meter_crs_for_raster(cost_path, centroid_hint=centroid_hint)
-    if not target_epsg:
-        return cost_path, None
-
-    converted_dir = cache.get("converted_dir") or os.path.dirname(cost_path)
-    base = os.path.splitext(os.path.basename(cost_path))[0]
-    projected_path = os.path.join(converted_dir, f"{base}_projected_epsg{target_epsg}.tif")
-    needs_refresh = (not os.path.exists(projected_path)) or (
-        os.path.getmtime(projected_path) < os.path.getmtime(cost_path)
+def _ensure_projected_cost_for_distance(cache: Cache, cost_path: str) -> Tuple[str, Optional[str]]:
+    metric_path, metadata = prepare_metric_analysis_raster(
+        cost_path,
+        os.path.join(cache.get("converted_dir") or os.path.dirname(cost_path), "_metric_grid_cache"),
+        resampling=Resampling.nearest,
     )
-    if needs_refresh:
-        reproject_raster_to_crs(cost_path, projected_path, CRS.from_epsg(int(target_epsg)))
-    return projected_path, f"Auto-projected cost surface to EPSG:{target_epsg} for meter-consistent circuit analysis."
+    cache["circuit_analysis_cost_tif"] = metric_path
+    cache["circuit_crs_metadata"] = metadata
+    return metric_path, (f"Prepared metric circuit grid: {metadata['analysis_crs']}." if metadata['reprojected'] else None)
 
 
 def _append_node_coordinates_to_pair_csv(
@@ -187,9 +174,8 @@ def run_circuit(
     projection_note = None
     try:
         circuit_cost_path, projection_note = _ensure_projected_cost_for_distance(cache, analysis_cost_path)
-    except Exception:
-        circuit_cost_path = analysis_cost_path
-        projection_note = None
+    except Exception as exc:
+        return False, f"Circuit raster preparation failed: {exc}", None
 
     try:
         result = compute_effective_resistances(
@@ -241,6 +227,8 @@ def run_circuit(
         "effective_resistance_min": float(pairs_df["effective_resistance"].min()) if "effective_resistance" in pairs_df.columns and not pairs_df.empty else None,
         "effective_resistance_max": float(pairs_df["effective_resistance"].max()) if "effective_resistance" in pairs_df.columns and not pairs_df.empty else None,
         "effective_resistance_mean": float(pairs_df["effective_resistance"].mean()) if "effective_resistance" in pairs_df.columns and not pairs_df.empty else None,
+        "analysis_cost_tif": circuit_cost_path,
+        "crs_preparation": cache.get("circuit_crs_metadata"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
