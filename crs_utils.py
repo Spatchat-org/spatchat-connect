@@ -21,20 +21,45 @@ def _parse_epsg_literal(s):
 
 
 def _parse_utm_any(s):
+    """Parse WGS84 UTM zone with hemisphere or MGRS latitude band.
+
+    N means north in either convention. Bare S is ambiguous, so explicit
+    'South' is required for the southern hemisphere; 'band S' means MGRS.
+    """
     txt = str(s).strip()
-    m = re.search(r'(?i)\b(?:utm|zone)\b[^0-9]*?(\d{1,2})\s*([A-Za-z])?', txt)
+    pattern = (r"(?i)^(?:(?:wgs\s*84\s*[/,-]?\s*)?utm\s*)?"
+               r"(?:zone\s*)?(\d{1,2})\s*([A-Za-z]+)?$")
+    m = re.fullmatch(pattern, txt)
     if not m:
-        m = re.search(r'\b(\d{1,2})\s*([C-HJ-NP-Xc-hj-np-x])\b', txt)
-    if not m:
-        return None
-    zone, band = int(m.group(1)), (m.group(2) or '').upper()
+        # Explicit MGRS latitude-band notation, e.g. 'UTM zone 17 band S'
+        m_band = re.fullmatch(
+            r"(?i)(?:utm\s*)?(?:zone\s*)?(\d{1,2})\s*(?:latitude\s*)?band\s*([C-HJ-NP-X])",
+            txt,
+        )
+        if not m_band:
+            return None
+        zone = int(m_band.group(1))
+        suffix = m_band.group(2).upper()
+        explicit_band = True
+    else:
+        zone = int(m.group(1))
+        suffix = (m.group(2) or "").upper()
+        explicit_band = False
     if not 1 <= zone <= 60:
-        return None
-    # N/S are ambiguous between hemisphere suffixes and latitude bands.
-    if band in ('N', 'S'):
-        raise ValueError("Ambiguous UTM N/S suffix. Use an explicit EPSG code (e.g. EPSG:32617 or EPSG:32717).")
-    hemi = 'N' if not band or band >= 'N' else 'S'
-    return (32600 if hemi == 'N' else 32700) + zone
+        raise ValueError("UTM zone must be between 1 and 60.")
+    if suffix in ("NORTH", "NORTHERN"):
+        north = True
+    elif suffix in ("SOUTH", "SOUTHERN"):
+        north = False
+    elif not suffix:
+        raise ValueError("Specify a UTM hemisphere or latitude band, e.g. '17N', '17M', or '17 South'.")
+    elif len(suffix) == 1 and suffix in "CDEFGHJKLMNPQRSTUVWX":
+        if suffix == "S" and not explicit_band:
+            raise ValueError("'17S' is ambiguous: use '17 South' for Southern Hemisphere or '17 band S' for MGRS latitude band S.")
+        north = suffix >= "N"
+    else:
+        raise ValueError("Unrecognized UTM suffix. Use a hemisphere or MGRS latitude band C-X (excluding I and O).")
+    return (32600 if north else 32700) + zone
 
 
 def parse_crs_input(user_text: str) -> int:
