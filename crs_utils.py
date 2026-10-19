@@ -176,3 +176,17 @@ def prepare_metric_analysis_raster(src_path: str, output_dir: str, *,
 # -----------------------------------------------------------------------------
 # Node CSV CRS support (same module as raster CRS utilities)
 # -----------------------------------------------------------------------------
+
+
+def validate_metric_analysis_raster(path: str) -> None:
+    """Validate the metric square-cell grid required by connectivity methods."""
+    with rasterio.open(path) as ds:
+        if ds.crs is None:
+            raise ValueError("Analysis raster has no CRS.")
+        if needs_meter_projection(ds.crs):
+            raise ValueError("Analysis raster must have a projected metric CRS.")
+        if not _metric_square_north_up(ds):
+            raise ValueError(
+                "Analysis raster must have north-up, square metric cells. "
+                "Run prepare_metric_analysis_raster first."
+            )
