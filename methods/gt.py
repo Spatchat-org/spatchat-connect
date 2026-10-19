@@ -140,7 +140,8 @@ def _prepare_graph(edges: pd.DataFrame, params: GraphAnalysisParams) -> nx.Graph
 
 
 def run_graph_theory_analysis(
-    edges: pd.DataFrame, params: Optional[GraphAnalysisParams] = None
+    edges: pd.DataFrame, params: Optional[GraphAnalysisParams] = None,
+    all_node_ids: Optional[Sequence[str]] = None,
 ) -> dict[str, object]:
     """Compute graph-theory metrics for an edge list.
 
@@ -180,6 +181,12 @@ def run_graph_theory_analysis(
     metrics = tuple(dict.fromkeys(params.metrics))  # preserve order, drop duplicates
 
     G = _prepare_graph(edges, params)
+    if all_node_ids is not None:
+        # Retain disconnected nodes as graph vertices; no artificial edges.
+        G.add_nodes_from(
+            str(node).strip() for node in all_node_ids
+            if pd.notna(node) and str(node).strip()
+        )
     if G.number_of_nodes() == 0:
         raise ValueError("Graph has no nodes after filtering invalid edges")
 
