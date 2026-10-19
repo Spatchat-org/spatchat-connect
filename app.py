@@ -1986,7 +1986,7 @@ def handle_nodes_upload(file, chat_history, cache):
         cache["out_of_bounds_node_ids"] = []
         _clear_node_dependent_results(cache)
         chat_history.append({"role": "assistant", "content": "Nodes cleared."})
-        return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
+        return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
 
     path = _file_to_path(file)
     try:
@@ -1995,7 +1995,7 @@ def handle_nodes_upload(file, chat_history, cache):
             raise ValueError("CSV must contain point coordinates and at least one row.")
     except Exception as exc:
         chat_history.append({"role": "assistant", "content": f"Failed to read nodes CSV: {exc}"})
-        return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
+        return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
 
     if path:
         dst = os.path.join(cache["upload_dir"], os.path.basename(path))
@@ -2003,7 +2003,7 @@ def handle_nodes_upload(file, chat_history, cache):
             shutil.copy2(path, dst)
         cache.setdefault("session_info", {})["nodes_csv"] = dst
     cache.setdefault("session_info", {})["nodes_uploaded_at"] = datetime.now(timezone.utc).isoformat()
-    _clear_outputs_dir(cache["output_dir"], preserve=(cache["converted_dir"],))
+    # Defer filesystem cleanup; avoid blocking the coordinate configuration UI.
     _clear_node_dependent_results(cache)
     cache["nodes_raw_df"] = df.copy()
     cache["nodes_df"] = None
@@ -2028,7 +2028,7 @@ def handle_nodes_upload(file, chat_history, cache):
             "Nodes CSV uploaded. Please select X and Y columns, optionally select a node ID, "
             "and enter the original coordinate system below. "
             "For WGS84 UTM zone 17 latitude band M, enter 'UTM 17M' or 'EPSG:32717'."})
-    return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
+    return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
 
 
 def _nodes_upload_ui(file, chat_history, cache):
@@ -3099,7 +3099,9 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         fn=_nodes_upload_ui,
         inputs=[nodes_input, chatbot, session_cache],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache,
-                 node_crs_panel, nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input]
+                 node_crs_panel, nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input],
+        queue=False,
+        show_progress="hidden",
     )
     nodes_confirm_btn.click(
         fn=_confirm_nodes_ui,
