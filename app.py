@@ -17,6 +17,13 @@ from difflib import get_close_matches
 from gradio.context import LocalContext
 
 from analysis_tracker import reset as reset_analysis_steps, set_current_session as set_analysis_session
+
+try:
+    from spatchat_gate import metered_chat
+except ImportError:  # launched without spatchat-gateway's client/ on PYTHONPATH
+    def metered_chat(**_kwargs):
+        return lambda fn: fn
+
 try:
     from llm_utils import ask_llm, ask_llm_stream
 except Exception:  # pragma: no cover
@@ -2052,6 +2059,14 @@ def handle_nodes_upload(file, chat_history, cache):
 # Chat handler (placeholder)
 # --------------------------------------------------------------------------------------
 
+def _chat_denied(markdown, chat_history, user_message, cache):
+    history = list(chat_history or []) + [
+        {"role": "user", "content": str(user_message or "")},
+        {"role": "assistant", "content": markdown},
+    ]
+    return history, gr.skip(), gr.skip(), gr.skip(), cache
+
+
 def handle_chat(chat_history, user_message, cache):
     chat_history = list(chat_history)
     cache = _ensure_session_workspace(dict(cache or _fresh_cache()))
@@ -3052,7 +3067,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         outputs=[chatbot, map_output, download_btn, status_output, session_cache]
     )
     chat_submit = user_input.submit(
-        fn=handle_chat,
+        fn=metered_chat(room="connect", message_index=1, deny=_chat_denied)(handle_chat),
         inputs=[chatbot, user_input, session_cache],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache],
         show_progress="hidden",
@@ -3075,7 +3090,7 @@ def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
         "share": False,
         "head": _SPLITTER_HEAD,
-        "server_name": "0.0.0.0",
+        "server_name": os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         "server_port": int(os.environ.get("PORT", 7860))
     }
     try:
