@@ -243,6 +243,24 @@ def execute_surface_conversion(
     cache["awaiting_conversion_choice"] = False
     cache["download_bundle_dirty"] = True
     cache["results_zip_path"] = None
+    # Previously computed outputs refer to the old resistance values.
+    # Invalidate downstream products and their preview layers.
+    for stale_key in (
+        "lcp_geojsonl", "lcp_index_csv", "lcp_unreachable_csv", "lcp_count_tif",
+        "lcp_cost_matrix", "lcp_zip_path", "lcp_analysis_metric_tif", "lcp_crs_metadata",
+        "kernel_surface_tif", "kernel_summary_json", "crk_analysis_cost_tif", "crk_crs_metadata",
+        "circuit_pairs_csv", "circuit_pairs_df", "circuit_unplaced_csv",
+        "circuit_summary_json", "circuit_current_density_tif", "circuit_analysis_cost_tif",
+        "circuit_crs_metadata", "graph_metrics_csv", "graph_metrics_df",
+        "graph_metric_name", "graph_edges_df", "graph_metric_ranges", "graph_probability_decay",
+        "graph_summary_json",
+    ):
+        cache[stale_key] = None
+    cache["preview_rasters"] = {
+        key: path for key, path in cache.get("preview_rasters", {}).items()
+        if not (key.startswith("Cumulative resistant kernel") or key == "Circuit current density"
+                or "LCP Density" in key)
+    }
 
     session = cache.get("session_info")
     if isinstance(session, dict):
@@ -262,11 +280,43 @@ def execute_surface_conversion(
             "Converted the raster to a cost surface. "
             f"Resistance values were rescaled {mode_sentence} to {format_range(min_val, max_val)}"
         )
+        # Keep conductance in sync with the latest cost scaling.
+        conductance_refresh_note = ""
+        conductance_path = conversion_output_path(cache, converted_dir, "conductance")
+        try:
+            convert_surface(
+                input_path=dest_path,
+                output_path=conductance_path,
+                src_type="resistance",
+                dst_type="conductance",
+                eps=1e-6,
+                max_resistance=None,
+                suitability_cap=1.0,
+                output_nodata=None,
+                force_dtype="float32",
+                scale_range=None,
+                scale_mode="linear",
+            )
+            preview = cache.get("preview_rasters")
+            if not isinstance(preview, dict):
+                preview = {}
+            preview = {
+                k: v for k, v in preview.items()
+                if not k.lower().startswith("converted conductance surface")
+            }
+            preview["Converted conductance surface"] = conductance_path
+            cache["preview_rasters"] = preview
+            conductance_refresh_note = " Conductance surface was refreshed to match the updated cost scaling."
+        except Exception as exc:
+            conductance_refresh_note = f" Conductance refresh failed: {exc}"
     else:
         message = "Converted the raster to a conductance surface."
+        conductance_refresh_note = ""
 
     if announce_path:
         message = f"{message} Saved to the converted surfaces folder."
+    if target == "resistance" and conductance_refresh_note:
+        message = f"{message}{conductance_refresh_note}"
 
     return True, message
 
@@ -372,10 +422,15 @@ def process_conversion_chat(
             return True, False
 
         response = f"Resistance range set to {format_range(min_val, max_val)}."
+        has_cost_surface = bool(cache.get("analysis_cost_tif"))
         if (
-            cache.get("conversion_target") == "resistance"
-            and cache.get("conversion_path")
-        ) or cache.get("surface_type") == "resistance":
+            (
+                cache.get("conversion_target") == "resistance"
+                and cache.get("conversion_path")
+            )
+            or cache.get("surface_type") == "resistance"
+            or has_cost_surface
+        ):
             success, conv_msg = execute_surface_conversion(cache, converted_dir, "resistance")
             if success:
                 if mode_msg:
@@ -435,7 +490,12 @@ def process_conversion_chat(
     if action == "scale_mode":
         mode_msg = _set_scale_mode(cache, parsed.get("scale_mode"))
         if mode_msg:
-            if cache.get("conversion_target") == "resistance" and cache.get("conversion_path"):
+            has_cost_surface = bool(cache.get("analysis_cost_tif"))
+            if (
+                (cache.get("conversion_target") == "resistance" and cache.get("conversion_path"))
+                or cache.get("surface_type") == "resistance"
+                or has_cost_surface
+            ):
                 success, conv_msg = execute_surface_conversion(
                     cache,
                     converted_dir,

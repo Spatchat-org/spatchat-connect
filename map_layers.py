@@ -28,6 +28,7 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 from pyproj import Transformer
 from branca.element import MacroElement, Template
 from lcp_flow import detect_nodes_lonlat
+from crk_flow import KERNEL_PREVIEW_LABEL, kernel_preview_label
 
 try:
     import pandas as pd
@@ -66,7 +67,9 @@ def _hash_color(key: str) -> str:
 
 def _raster_bounds_wgs84(ds: rasterio.io.DatasetReader) -> List[List[float]]:
     b = ds.bounds
-    src_crs = ds.crs.to_string() if ds.crs else "EPSG:4326"
+    if ds.crs is None:
+        raise ValueError("Raster CRS is missing; cannot compute geographic bounds.")
+    src_crs = ds.crs.to_string()
     if src_crs != "EPSG:4326":
         to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
         pts = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
@@ -84,7 +87,9 @@ def _read_raster_preview_wgs84(
     resampling: Resampling = Resampling.bilinear,
 ) -> Tuple[np.ndarray, List[List[float]]]:
     arr = src.read(1, masked=True).astype(np.float32, copy=False).filled(np.nan)
-    if src.crs is None or str(src.crs).upper() == "EPSG:4326":
+    if src.crs is None:
+        raise ValueError("Raster CRS is missing; assign the correct CRS before mapping.")
+    if src.crs.to_epsg() == 4326:
         west, south, east, north = array_bounds(src.height, src.width, src.transform)
         return arr, [[south, west], [north, east]]
 
@@ -148,31 +153,29 @@ def _rgba_from_array(
     transform: Optional[str] = None,
     transparent_below: Optional[float] = None,
 ) -> Tuple[np.ndarray, float, float, float, float]:
-    """Percentile stretch to 0..1 then map to RGBA uint8 (A preserved)."""
+    """Percentile stretch over valid cells only; NoData remains transparent."""
     arr = np.asarray(arr, dtype=np.float32)
-    alpha_mask = np.isfinite(arr)
-    alpha_values = np.nan_to_num(arr, nan=0.0)
-    arr = np.nan_to_num(arr, nan=0.0)
+    valid = np.isfinite(arr)
+    if transparent_below is not None:
+        valid &= arr > float(transparent_below)
+    if not np.any(valid):
+        return (np.zeros((*arr.shape, 4), dtype=np.uint8),
+                float('nan'), float('nan'), float('nan'), float('nan'))
+    display = np.where(np.isfinite(arr), arr, 0.0)
     if transform == "log1p":
-        arr = np.log1p(np.maximum(arr, 0.0))
-    if not np.isfinite(arr).any():
-        rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
-        return rgba, float("nan"), float("nan"), float("nan"), float("nan")
-    actual_min = float(np.nanmin(arr))
-    actual_max = float(np.nanmax(arr))
-    lo = float(np.nanpercentile(arr, pmin))
-    hi = float(np.nanpercentile(arr, pmax))
+        display = np.log1p(np.maximum(display, 0.0))
+    values = display[valid]
+    actual_min, actual_max = float(values.min()), float(values.max())
+    lo, hi = float(np.percentile(values, pmin)), float(np.percentile(values, pmax))
     if hi <= lo:
         lo, hi = actual_min, actual_max
-        if hi <= lo:
-            rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
-            return rgba, lo, hi, actual_min, actual_max
-    arr = np.clip((arr - lo) / (hi - lo + 1e-12), 0.0, 1.0)
-    cmap = plt.get_cmap(cmap_name)
-    rgba = (cmap(arr) * 255).astype(np.uint8)
-    if transparent_below is not None:
-        alpha_mask &= alpha_values > float(transparent_below)
-    rgba[..., 3] = np.where(alpha_mask, rgba[..., 3], 0).astype(np.uint8)
+    if hi <= lo:
+        # Constant valid surface: use a consistent middle colormap value.
+        normalized = np.full(arr.shape, 0.5, dtype=np.float32)
+    else:
+        normalized = np.clip((display - lo) / (hi - lo), 0.0, 1.0)
+    rgba = (plt.get_cmap(cmap_name)(normalized) * 255).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, rgba[..., 3], 0).astype(np.uint8)
     return rgba, lo, hi, actual_min, actual_max
 
 
@@ -1020,7 +1023,7 @@ def _add_layer_control_sort_patch(m: folium.Map) -> None:
     if getattr(root, "_spatchat_layer_sort_patch_added", False):
         return
     setattr(root, "_spatchat_layer_sort_patch_added", True)
-    patch_html = """
+    patch_html = r"""
     {% macro html(this, kwargs) %}
     <style>
       .spatchat-layer-order-handle {
@@ -1636,7 +1639,8 @@ def _add_geotiff_overlay(
                 actual_max=actual_max,
             )
             return layer
-    except Exception:
+    except Exception as exc:
+        print(f"[map] Raster overlay failed for {name!r}: {exc}")
         return None
 
 
@@ -1680,7 +1684,7 @@ def _build_node_marker_features(
         features.append(
             {
                 "location": [lat, lon],
-                "radius": 6,
+                "radius": 7,
                 "color": "#ffffff",
                 "weight": 2,
                 "fillColor": "#3d8cff",
@@ -1748,68 +1752,47 @@ def make_graph_metric_layer(
     show: bool = True,
     pane: Optional[str] = None,
 ) -> Optional[Tuple[folium.map.FeatureGroup, float, float]]:
+    """Use original node WGS84 locations and centered, fixed-size CircleMarkers."""
     if nodes_df is None or metrics_df is None or metric_col not in metrics_df.columns:
         return None
-
     metrics_id_col = "node_id" if "node_id" in metrics_df.columns else "node"
     if metrics_id_col not in metrics_df.columns:
         return None
-
-    joined = nodes_df.merge(metrics_df, left_on=id_col, right_on=metrics_id_col, how="inner")
-    if joined.empty:
+    if not {id_col, lon_col, lat_col}.issubset(nodes_df.columns):
         return None
 
-    values = pd.to_numeric(joined[metric_col], errors="coerce")
-    valid = values[np.isfinite(values)]
+    # Do not merge coordinates from metrics: source-of-truth is uploaded nodes.
+    locations = nodes_df[[id_col, lon_col, lat_col]].copy()
+    locations["_join_id"] = locations[id_col].astype(str).str.strip()
+    locations = locations.drop_duplicates("_join_id", keep="first")
+    metrics = metrics_df[[metrics_id_col, metric_col]].copy()
+    metrics["_join_id"] = metrics[metrics_id_col].astype(str).str.strip()
+    metrics = metrics.drop_duplicates("_join_id", keep="first")
+    joined = locations.merge(metrics[["_join_id", metric_col]], on="_join_id", how="left", validate="one_to_one")
+    vals = pd.to_numeric(joined[metric_col], errors="coerce")
+    valid = vals[np.isfinite(vals)]
     if valid.empty:
         return None
-
-    vmin = float(valid.min())
-    vmax = float(valid.max())
-    span = max(vmax - vmin, 1e-12)
+    vmin, vmax = float(valid.min()), float(valid.max())
+    span = vmax - vmin
     cmap = plt.get_cmap("plasma")
     layer = folium.FeatureGroup(name=name or f"Graph model ({metric_col})", show=show)
-
-    for idx, row in joined.iterrows():
+    for _, row in joined.iterrows():
         try:
-            val = float(row[metric_col])
-            if not np.isfinite(val):
-                continue
-            lat = float(row[lat_col])
-            lon = float(row[lon_col])
-        except Exception:
+            val = float(row[metric_col]); lat = float(row[lat_col]); lon = float(row[lon_col])
+        except (TypeError, ValueError):
             continue
-        norm = (val - vmin) / span
-        color = _rgba_to_hex(cmap(norm))
-        radius = 5.0 + 7.0 * norm
-        tooltip = f"{row[id_col]}<br>{metric_col}: {_format_value(val)}"
-        diameter = int(round(radius * 2.0))
-        border = max(2, int(round(radius * 0.28)))
-        icon_html = (
-            '<div style="'
-            f'width:{diameter}px;'
-            f'height:{diameter}px;'
-            f'margin-left:-{diameter / 2.0:.1f}px;'
-            f'margin-top:-{diameter / 2.0:.1f}px;'
-            'border-radius:50%;'
-            f'background:{color};'
-            f'border:{border}px solid rgba(255,255,255,0.9);'
-            'box-shadow:0 0 0 1px rgba(0,0,0,0.2);'
-            'opacity:0.92;'
-            '"></div>'
-        )
-        folium.Marker(
-            location=[lat, lon],
-            tooltip=tooltip,
-            icon=folium.DivIcon(
-                html=icon_html,
-                icon_size=(diameter, diameter),
-                icon_anchor=(diameter / 2.0, diameter / 2.0),
-                class_name="",
-            ),
+        if not all(np.isfinite(v) for v in (val, lat, lon)):
+            continue
+        norm = (val - vmin) / span if span > 1e-12 else 0.5
+        color = _rgba_to_hex(cmap(float(np.clip(norm, 0.0, 1.0))))
+        folium.CircleMarker(
+            location=[lat, lon], radius=7,
+            color="#ffffff", weight=2,
+            fill=True, fill_color=color, fill_opacity=1.0,
+            tooltip=f"{row[id_col]} | {metric_col}: {_format_value(val)}",
             pane=pane,
         ).add_to(layer)
-
     return layer, vmin, vmax
 
 
@@ -2167,7 +2150,8 @@ def build_preview_from_cache(cache: Dict[str, Any]) -> str:
             except Exception:
                 label_override = cache.get("conversion_label")
         if input_raster and os.path.exists(input_raster) and os.path.abspath(input_raster) != os.path.abspath(analysis_cost_raster):
-            base_rasters.append((input_raster, input_label))
+            # Keep the original raster available for exports, but hide it from map overlays
+            # once a dedicated analysis cost surface exists.
             cost_label = label_override or "Converted cost surface"
         else:
             cost_label = label_override or input_label
@@ -2178,6 +2162,24 @@ def build_preview_from_cache(cache: Dict[str, Any]) -> str:
             if not path or not os.path.exists(path):
                 continue
             extra_rasters.append((path, label or "Converted surface"))
+    # Ensure CRK appears in Layer Control even if preview_rasters state is stale.
+    kernel_surface_tif = cache.get("kernel_surface_tif")
+    if kernel_surface_tif and os.path.exists(kernel_surface_tif):
+        kernel_distance = cache.get("kernel_dispersal_distance_m")
+        if kernel_distance is not None:
+            try:
+                kernel_label = kernel_preview_label(float(kernel_distance))
+            except Exception:
+                kernel_label = KERNEL_PREVIEW_LABEL
+        else:
+            kernel_label = KERNEL_PREVIEW_LABEL
+        already_listed = any(
+            os.path.abspath(path) == os.path.abspath(kernel_surface_tif)
+            for path, _ in extra_rasters
+            if path
+        )
+        if not already_listed:
+            extra_rasters.append((kernel_surface_tif, kernel_label))
 
     graph_metrics_df = cache.get("graph_metrics_df")
     graph_metric_names: List[str] = []
@@ -2186,16 +2188,9 @@ def build_preview_from_cache(cache: Dict[str, Any]) -> str:
             if metric_name in graph_metrics_df.columns:
                 graph_metric_names.append(metric_name)
 
+    # All map layers use the same original WGS84 node coordinates.
+    # LCP computation may snap to raster cells internally, but markers do not.
     preview_nodes_df = df
-    if preview_nodes_df is not None:
-        snap_raster = analysis_cost_raster if analysis_cost_raster and os.path.exists(analysis_cost_raster) else input_raster
-        preview_nodes_df = _snap_nodes_to_raster_centers(
-            preview_nodes_df,
-            raster_path=snap_raster,
-            id_col="node_id",
-            lon_col=lon_col or "longitude",
-            lat_col=lat_col or "latitude",
-        )
 
     return build_connectivity_map(
         preview_nodes_df,

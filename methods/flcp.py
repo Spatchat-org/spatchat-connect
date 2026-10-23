@@ -193,7 +193,7 @@ def _append_node_coordinates_to_pair_csv(
     if not required.issubset(nodes_df.columns):
         return
     try:
-        pairs_df = pd.read_csv(csv_path)
+        pairs_df = pd.read_csv(csv_path, dtype={"source": str, "target": str})
     except Exception:
         return
     if pairs_df.empty or "source" not in pairs_df.columns or "target" not in pairs_df.columns:
@@ -211,6 +211,8 @@ def _append_node_coordinates_to_pair_csv(
         )
     )
     coords_df["node_id"] = coords_df["node_id"].astype(str)
+    pairs_df["source"] = pairs_df["source"].astype(str)
+    pairs_df["target"] = pairs_df["target"].astype(str)
 
     source_coords = coords_df.rename(
         columns={
@@ -470,6 +472,19 @@ def compute_all_pairs_lcps(
         H, W = ds.height, ds.width
         transform = ds.transform
         raster_crs = ds.crs
+        if raster_crs is None:
+            raise ValueError("Cost raster has no CRS; prepare a metric analysis raster first.")
+        crs_obj = CRS.from_user_input(raster_crs)
+        units = [a.unit_name.lower() for a in crs_obj.axis_info if a.unit_name]
+        if not crs_obj.is_projected or len(units) < 2 or not all(
+            "metre" in u or "meter" in u for u in units[:2]
+        ):
+            raise ValueError("LCP requires a projected raster with metre units; run metric raster preparation.")
+        if (transform.a <= 0 or transform.e >= 0 or
+                abs(transform.b) > 1e-8 or abs(transform.d) > 1e-8 or
+                abs(abs(transform.a) - abs(transform.e)) >
+                1e-6 * max(abs(transform.a), abs(transform.e), 1)):
+            raise ValueError("LCP requires a north-up, square-cell metric raster.")
         pixel_size = _estimate_pixel_size(transform)
 
     # Prepare transformer for node coords → raster CRS

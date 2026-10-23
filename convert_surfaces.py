@@ -196,6 +196,7 @@ def convert_surface(
         nodata_out = output_nodata if output_nodata is not None else nodata_in
 
         data = src.read(masked=True).astype(np.float64)
+        original_mask = np.ma.getmaskarray(data)
         converted = np.full(data.shape, np.nan, dtype=np.float64)
 
         for idx in range(src.count):
@@ -228,7 +229,7 @@ def convert_surface(
 
         profile.update(dtype=out_dtype, nodata=nodata_out)
 
-        filled = np.where(np.isnan(converted), nodata_out, converted).astype(out_dtype)
+        filled = np.where(original_mask | ~np.isfinite(converted), nodata_out, converted).astype(out_dtype)
 
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(filled)

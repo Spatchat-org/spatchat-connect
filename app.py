@@ -56,6 +56,8 @@ from branca.element import MacroElement, Template
 from map_layers import build_preview_from_cache
 from conversion_flow import conversion_prompt, process_conversion_chat, execute_surface_conversion, interpret_conversion_message
 from lcp_flow import detect_nodes_lonlat, run_lcp
+from coords_utils import suggest_node_columns, prepare_node_coordinates
+from crs_utils import parse_crs_input
 from graph_flow import run_graph_model
 from crk_flow import KERNEL_PREVIEW_LABEL, run_crk
 from cs_flow import CIRCUIT_PREVIEW_LABEL, run_circuit
@@ -85,7 +87,11 @@ def _fresh_cache() -> dict:
         "surface_type": None,    # suitability / resistance / conductance
         "awaiting_surface_type": False,
         "last_upload_kind": None,  # "raster" or "nodes"
-        "nodes_df": None,        # pandas DataFrame with detected lon/lat columns
+        "nodes_df": None,        # prepared WGS84 nodes only
+        "nodes_raw_df": None,
+        "nodes_crs_pending": False,
+        "nodes_original_crs": None,
+        "nodes_id_source": None,
         "nodes_lon_col": None,
         "nodes_lat_col": None,
         "lcp_geojsonl": None,
@@ -1729,7 +1735,7 @@ def _help_text() -> str:
     return (
         "Hi, I'm SpatChat! This room helps you prepare landscape connectivity inputs and run connectivity analyses from a raster surface and optional node locations.\n\n"
         "Upload a raster (required): a GeoTIFF representing a landscape surface such as habitat suitability, resistance/cost, or conductance.\n"
-        "Upload nodes CSV (optional): point locations to connect or evaluate, such as habitat patches, source populations, detections, sampling sites, or restoration targets, with longitude/latitude columns.\n\n"
+        "Upload nodes CSV (optional): point locations to connect or evaluate, such as habitat patches, source populations, detections, sampling sites, or restoration targets, with geographic or projected coordinates.\n\n"
         "You can then ask for: \n"
         "• Cumulative resistant kernel (specify a dispersal distance)\n"
         "• Least‑cost paths / cost distance / corridors\n"
@@ -1943,117 +1949,137 @@ def handle_raster_upload(file, cache):
     return ([{"role": "assistant", "content": info}], _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache)
 
 
-def handle_nodes_upload(file, chat_history, cache):
-    """Cache nodes CSV in memory, detect lon/lat, and refresh preview map."""
-    chat_history = list(chat_history)
-    cache = _ensure_session_workspace(dict(cache or _fresh_cache()))
-    output_dir = cache["output_dir"]
-    converted_dir = cache["converted_dir"]
-
-    if file is None:
-        # Do not reset raster when clearing nodes; preserve current surface and preview
-        _clear_outputs_dir(output_dir, preserve=(converted_dir,))
-        cache["nodes_df"] = None
-        cache["nodes_lon_col"] = None
-        cache["nodes_lat_col"] = None
-        cache["out_of_bounds_node_count"] = 0
-        cache["out_of_bounds_node_ids"] = []
-        cache["last_upload_kind"] = None
-        # Clear LCP-related artifacts only
-        cache["lcp_geojsonl"] = None
-        cache["lcp_index_csv"] = None
-        cache["lcp_unreachable_csv"] = None
-        cache["lcp_count_tif"] = None
-        cache["lcp_cost_matrix"] = None
-        cache["lcp_zip_path"] = None
-        _clear_circuit_outputs(cache)
-        cache["graph_metrics_csv"] = None
-        cache["graph_metrics_df"] = None
-        cache["graph_metric_name"] = None
-        cache["graph_edges_df"] = None
-        cache["graph_metric_ranges"] = None
-        cache["graph_probability_decay"] = None
-        cache["graph_summary_json"] = None
-        _mark_results_dirty(cache, clear_bundle_path=True)
-        chat_history.append({"role": "assistant", "content": "Nodes cleared."})
-        return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
-
-    try:
-        path = _file_to_path(file)
-        df = pd.read_csv(path if path else file)
-    except Exception as e:
-        chat_history.append({"role": "assistant", "content": f"Failed to read nodes CSV: {e}"})
-        return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
-
-    upload_dir = cache["upload_dir"]
-    persisted_nodes_path = None
-    if path:
-        dst_name = os.path.basename(path)
-        persisted_nodes_path = os.path.join(upload_dir, dst_name)
-        try:
-            if not (os.path.exists(persisted_nodes_path) and os.path.samefile(path, persisted_nodes_path)):
-                shutil.copy(path, persisted_nodes_path)
-        except OSError:
-            try:
-                shutil.copy(path, persisted_nodes_path)
-            except Exception as e:
-                chat_history.append({"role": "assistant", "content": f"Failed to save nodes CSV: {e}"})
-                return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
-
-    # Never reset the raster when nodes are uploaded; just clear outputs
-    _clear_outputs_dir(output_dir, preserve=(converted_dir,))
-
-    note = "Nodes CSV uploaded. "
-    guess = detect_nodes_lonlat(df) or (None, None)
-    lon_col, lat_col = guess
-
-    if lon_col and lat_col:
-        cache["nodes_lon_col"] = lon_col
-        cache["nodes_lat_col"] = lat_col
-        note += f"Detected lon/lat columns: {lon_col} / {lat_col}."
-    else:
-        cache["nodes_lon_col"] = None
-        cache["nodes_lat_col"] = None
-        note += (
-            "Lat/Lon columns not detected. Include 'longitude'/'latitude' (or 'lon'/'lat')."
-        )
-
-    if "node_id" not in df.columns:
-        df = df.copy()
-        df["node_id"] = _auto_node_ids(len(df))
-
+def _clear_node_dependent_results(cache):
+    """Invalidate all results based on node locations."""
+    for key in ("lcp_geojsonl", "lcp_index_csv", "lcp_unreachable_csv",
+                "lcp_count_tif", "lcp_cost_matrix", "lcp_zip_path",
+                "graph_metrics_csv", "graph_metrics_df", "graph_metric_name",
+                "graph_edges_df", "graph_metric_ranges", "graph_probability_decay",
+                "graph_summary_json"):
+        cache[key] = None
     _clear_kernel_outputs(cache)
     _clear_circuit_outputs(cache)
-    cache["nodes_df"] = df
-    _normalize_cached_nodes_df(cache)
-    cache["lcp_geojsonl"] = None
-    cache["lcp_index_csv"] = None
-    cache["lcp_unreachable_csv"] = None
-    cache["lcp_count_tif"] = None
-    cache["lcp_cost_matrix"] = None
-    cache["lcp_zip_path"] = None
-    cache["graph_metrics_csv"] = None
-    cache["graph_metrics_df"] = None
-    cache["graph_metric_name"] = None
-    cache["graph_edges_df"] = None
-    cache["graph_metric_ranges"] = None
-    cache["graph_probability_decay"] = None
-    cache["graph_summary_json"] = None
     _mark_results_dirty(cache, clear_bundle_path=True)
-    _refresh_out_of_bounds_node_cache(cache)
-    out_of_bounds_note = _out_of_bounds_nodes_message(cache)
-    if out_of_bounds_note:
-        note = f"{note} {out_of_bounds_note}"
 
-    chat_history.append({"role": "assistant", "content": note})
+
+def _set_prepared_nodes(cache, prepared, source_crs, id_source):
+    cache["nodes_df"] = prepared
+    cache["nodes_lon_col"] = "longitude"
+    cache["nodes_lat_col"] = "latitude"
+    cache["nodes_crs_pending"] = False
+    cache["nodes_original_crs"] = str(source_crs)
+    cache["nodes_id_source"] = id_source
+    _refresh_out_of_bounds_node_cache(cache)
+    session = cache.setdefault("session_info", {})
+    session.update({
+        "nodes_lon_col": "longitude", "nodes_lat_col": "latitude",
+        "nodes_source_crs": str(source_crs), "nodes_id_source": id_source,
+        "nodes_count": len(prepared),
+        "nodes_coordinate_conversion": "source CRS to EPSG:4326",
+    })
+
+
+def handle_nodes_upload(file, chat_history, cache):
+    """Upload nodes; prompt for CRS unless geographic coordinates are unambiguous."""
+    chat_history = list(chat_history or [])
+    cache = _ensure_session_workspace(dict(cache or _fresh_cache()))
+    if file is None:
+        cache["nodes_df"] = None
+        cache["nodes_raw_df"] = None
+        cache["nodes_lon_col"] = None
+        cache["nodes_lat_col"] = None
+        cache["nodes_crs_pending"] = False
+        cache["nodes_original_crs"] = None
+        cache["out_of_bounds_node_count"] = 0
+        cache["out_of_bounds_node_ids"] = []
+        _clear_node_dependent_results(cache)
+        chat_history.append({"role": "assistant", "content": "Nodes cleared."})
+        return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
+
+    path = _file_to_path(file)
+    try:
+        df = pd.read_csv(path if path else file)
+        if df.empty or len(df.columns) < 2:
+            raise ValueError("CSV must contain point coordinates and at least one row.")
+    except Exception as exc:
+        chat_history.append({"role": "assistant", "content": f"Failed to read nodes CSV: {exc}"})
+        return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
+
+    if path:
+        dst = os.path.join(cache["upload_dir"], os.path.basename(path))
+        if os.path.abspath(path) != os.path.abspath(dst):
+            shutil.copy2(path, dst)
+        cache.setdefault("session_info", {})["nodes_csv"] = dst
+    cache.setdefault("session_info", {})["nodes_uploaded_at"] = datetime.now(timezone.utc).isoformat()
+    # Defer filesystem cleanup; avoid blocking the coordinate configuration UI.
+    _clear_node_dependent_results(cache)
+    cache["nodes_raw_df"] = df.copy()
+    cache["nodes_df"] = None
+    cache["nodes_lon_col"] = None
+    cache["nodes_lat_col"] = None
+    cache["nodes_crs_pending"] = True
     cache["last_upload_kind"] = "nodes"
-    if isinstance(cache.get("session_info"), dict):
-        session = cache["session_info"]
-        session["nodes_csv"] = persisted_nodes_path or path or getattr(file, "name", None)
-        session["nodes_uploaded_at"] = datetime.now(timezone.utc).isoformat()
-        session["nodes_lon_col"] = cache["nodes_lon_col"]
-        session["nodes_lat_col"] = cache["nodes_lat_col"]
-    return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache
+
+    x, y, confident = suggest_node_columns(df)
+    if confident:
+        try:
+            prepared = prepare_node_coordinates(df, x, y, "EPSG:4326", None)
+            _set_prepared_nodes(cache, prepared, "EPSG:4326", None)
+            chat_history.append({"role": "assistant", "content":
+                f"Nodes uploaded. Detected WGS84 longitude/latitude ({x}, {y}). "
+                "Node IDs are ready. You can run connectivity analyses."})
+        except ValueError as exc:
+            chat_history.append({"role": "assistant", "content":
+                f"Please confirm the coordinate columns and CRS: {exc}"})
+    else:
+        chat_history.append({"role": "assistant", "content":
+            "Nodes CSV uploaded. Please select X and Y columns, optionally select a node ID, "
+            "and enter the original coordinate system below. "
+            "For WGS84 UTM zone 17 latitude band M, enter 'UTM 17M' or 'EPSG:32717'."})
+    return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
+
+
+def _nodes_upload_ui(file, chat_history, cache):
+    result = handle_nodes_upload(file, chat_history, cache)
+    chat, map_html, download, status, updated = result
+    raw = updated.get("nodes_raw_df")
+    pending = bool(updated.get("nodes_crs_pending"))
+    columns = list(raw.columns) if isinstance(raw, pd.DataFrame) else []
+    x, y, _ = suggest_node_columns(raw) if columns else (None, None, False)
+    id_suggest = next((c for c in columns if str(c).strip().lower() in ("node_id", "id", "patch_id", "site_id")), None)
+    return (chat, map_html, download, status, updated,
+            gr.update(visible=pending),
+            gr.update(choices=columns, value=x, visible=pending),
+            gr.update(choices=columns, value=y, visible=pending),
+            gr.update(choices=["(Generate automatically)"] + columns,
+                      value=id_suggest or "(Generate automatically)", visible=pending),
+            gr.update(value="", visible=pending))
+
+
+def _confirm_nodes_ui(x_col, y_col, id_col, crs_text, chat_history, cache):
+    chat_history = list(chat_history or [])
+    cache = _ensure_session_workspace(dict(cache or _fresh_cache()))
+    raw = cache.get("nodes_raw_df")
+    if not isinstance(raw, pd.DataFrame) or raw.empty:
+        chat_history.append({"role": "assistant", "content": "Upload a nodes CSV first."})
+        return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache, gr.skip()
+    try:
+        source_crs = parse_crs_input(crs_text)
+        selected_id = None if id_col in (None, "(Generate automatically)") else id_col
+        prepared = prepare_node_coordinates(raw, x_col, y_col, source_crs, selected_id)
+        _set_prepared_nodes(cache, prepared, source_crs, selected_id)
+        _clear_node_dependent_results(cache)
+        _refresh_out_of_bounds_node_cache(cache)
+        chat_history.append({"role": "assistant", "content":
+            f"Coordinates confirmed: {len(prepared)} nodes transformed from {source_crs} to WGS84. "
+            "Original columns and attributes preserved. Connectivity analyses are ready."})
+        note = _out_of_bounds_nodes_message(cache)
+        if note:
+            chat_history.append({"role": "assistant", "content": note})
+        return chat_history, _build_preview_map(cache), _download_update(cache), _status_clear_update(), cache, gr.update(visible=False)
+    except Exception as exc:
+        chat_history.append({"role": "assistant", "content": f"Coordinate configuration failed: {exc}"})
+        return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache, gr.update(visible=True)
 
 
 # --------------------------------------------------------------------------------------
@@ -2083,6 +2109,12 @@ def handle_chat(chat_history, user_message, cache):
 
     chat_history.append({"role": "user", "content": user_message})
     yield chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
+
+    if cache.get("nodes_crs_pending") and _detect_intents(msg):
+        chat_history.append({"role": "assistant", "content":
+            "Please confirm the uploaded nodes' coordinate columns and CRS before running connectivity analyses."})
+        yield chat_history, gr.skip(), _download_update(cache), _status_clear_update(), cache
+        return
 
     intent = _detect_intent(msg)
     intents = _detect_intents(msg)
@@ -2452,7 +2484,7 @@ _WELCOME_MESSAGE = (
     "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\n"
     "Upload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\n"
     "Optionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, "
-    "populations, detections, or sites, with longitude/latitude columns."
+    "populations, detections, or sites, with geographic or projected coordinates."
 )
 
 _SUGGESTION_CHIPS = [
@@ -2468,7 +2500,13 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     """
     <style>
     .gradio-container {
-        --spatchat-connect-bg: var(--body-background-fill, var(--background-fill-primary, #ffffff));
+        --spatchat-connect-bg: #f6f8fb;
+        --spatchat-chat-text: #131722;
+    }
+
+    .dark .gradio-container {
+        --spatchat-connect-bg: var(--body-background-fill, var(--background-fill-primary, #0f141d));
+        --spatchat-chat-text: var(--body-text-color, #edf2ff);
     }
 
     .gradio-container {
@@ -2573,6 +2611,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         height: 56vh !important;
         min-height: 56vh !important;
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-chat-text) !important;
         border: none !important;
         box-shadow: none !important;
         border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
@@ -2581,6 +2620,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
 
     #spatchat-chatbot > div {
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-chat-text) !important;
         border: none !important;
         box-shadow: none !important;
         border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
@@ -2786,13 +2826,14 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         margin: 0 !important;
         max-width: 100% !important;
         width: auto !important;
-        color: inherit !important;
+        color: var(--spatchat-chat-text) !important;
     }
 
     #spatchat-chatbot .message-row.bot .message *,
     #spatchat-chatbot .message-row.assistant .message *,
     #spatchat-chatbot [data-testid="chatbot-message-assistant"] .message * {
         background: transparent !important;
+        color: inherit !important;
     }
 
     /* User row aligned right */
@@ -3011,6 +3052,13 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                     )
             # "+" uploads the raster surface (required); nodes are added with the chip above.
             raster_input, user_input, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".tif", ".tiff"])
+            with gr.Column(visible=False, elem_id="spatchat-node-crs-panel") as node_crs_panel:
+                gr.Markdown("**Configure Node Coordinates**\n\nSelect columns and specify the original CRS.")
+                nodes_x_dropdown = gr.Dropdown(label="X coordinate (Easting / Longitude)", choices=[], interactive=True)
+                nodes_y_dropdown = gr.Dropdown(label="Y coordinate (Northing / Latitude)", choices=[], interactive=True)
+                nodes_id_dropdown = gr.Dropdown(label="Node identifier (optional)", choices=["(Generate automatically)"], value="(Generate automatically)", interactive=True)
+                nodes_crs_input = gr.Textbox(label="Coordinate Reference System (CRS)", placeholder="EPSG:32717 or UTM 17M")
+                nodes_confirm_btn = gr.Button("Confirm Coordinates", variant="primary")
             download_btn = gr.DownloadButton(
                 "⭳ Download Results",
                 value=_ensure_placeholder_download(),
@@ -3039,9 +3087,17 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         outputs=[chatbot, map_output, download_btn, status_output, session_cache]
     )
     nodes_input.upload(
-        fn=handle_nodes_upload,
+        fn=_nodes_upload_ui,
         inputs=[nodes_input, chatbot, session_cache],
-        outputs=[chatbot, map_output, download_btn, status_output, session_cache]
+        outputs=[chatbot, map_output, download_btn, status_output, session_cache,
+                 node_crs_panel, nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input],
+        queue=False,
+        show_progress="hidden",
+    )
+    nodes_confirm_btn.click(
+        fn=_confirm_nodes_ui,
+        inputs=[nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input, chatbot, session_cache],
+        outputs=[chatbot, map_output, download_btn, status_output, session_cache, node_crs_panel],
     )
     chat_submit = gr.on(
         triggers=[user_input.submit, send_btn.click],

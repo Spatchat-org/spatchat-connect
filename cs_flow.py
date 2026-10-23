@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
+from pyproj import CRS
 
+from crs_utils import prepare_metric_analysis_raster
+from rasterio.warp import Resampling
 from lcp_flow import detect_nodes_lonlat
 from methods.cs import CircuitTheoryParams, compute_effective_resistances
 
@@ -19,6 +22,17 @@ CIRCUIT_EDGE_PREVIEW_MAX_PAIRS = 500
 def _auto_node_ids(count: int) -> list[str]:
     width = max(2, len(str(max(1, count))))
     return [f"node_{i:0{width}d}" for i in range(1, count + 1)]
+
+
+def _ensure_projected_cost_for_distance(cache: Cache, cost_path: str) -> Tuple[str, Optional[str]]:
+    metric_path, metadata = prepare_metric_analysis_raster(
+        cost_path,
+        os.path.join(cache.get("converted_dir") or os.path.dirname(cost_path), "_metric_grid_cache"),
+        resampling=Resampling.nearest,
+    )
+    cache["circuit_analysis_cost_tif"] = metric_path
+    cache["circuit_crs_metadata"] = metadata
+    return metric_path, (f"Prepared metric circuit grid: {metadata['analysis_crs']}." if metadata['reprojected'] else None)
 
 
 def _append_node_coordinates_to_pair_csv(
@@ -156,9 +170,16 @@ def run_circuit(
         lat_col=lat_col,
     )
 
+    circuit_cost_path = analysis_cost_path
+    projection_note = None
+    try:
+        circuit_cost_path, projection_note = _ensure_projected_cost_for_distance(cache, analysis_cost_path)
+    except Exception as exc:
+        return False, f"Circuit raster preparation failed: {exc}", None
+
     try:
         result = compute_effective_resistances(
-            cost_tif=analysis_cost_path,
+            cost_tif=circuit_cost_path,
             nodes_df=nodes_df,
             params=params,
             outdir=job_dir,
@@ -206,6 +227,8 @@ def run_circuit(
         "effective_resistance_min": float(pairs_df["effective_resistance"].min()) if "effective_resistance" in pairs_df.columns and not pairs_df.empty else None,
         "effective_resistance_max": float(pairs_df["effective_resistance"].max()) if "effective_resistance" in pairs_df.columns and not pairs_df.empty else None,
         "effective_resistance_mean": float(pairs_df["effective_resistance"].mean()) if "effective_resistance" in pairs_df.columns and not pairs_df.empty else None,
+        "analysis_cost_tif": circuit_cost_path,
+        "crs_preparation": cache.get("circuit_crs_metadata"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -251,6 +274,8 @@ def run_circuit(
             f"Circuit analysis complete. Computed effective resistance for {len(pairs_df)} node pairs and added a current-density raster to the map. "
             "Click \"Download Results\" to grab the outputs."
         )
+    if projection_note:
+        message = f"{projection_note} {message}"
     if len(pairs_df) > CIRCUIT_EDGE_PREVIEW_MAX_PAIRS:
         message = (
             f"{message} The straight-line pair overlay was skipped in the preview to keep the app responsive."
