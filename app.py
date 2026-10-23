@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple, Union
 
 import inspect, gradio as gr
+import spatchat_ui
 import pandas as pd
 import re
 from difflib import get_close_matches
@@ -2447,15 +2448,22 @@ window.spatchatBeginResize = function(event) {
 </script>
 """
 
+_WELCOME_MESSAGE = (
+    "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\n"
+    "Upload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\n"
+    "Optionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, "
+    "populations, detections, or sites, with longitude/latitude columns."
+)
+
+_SUGGESTION_CHIPS = [
+    "Least-cost paths",
+    "Graph connectivity",
+    "Cumulative resistant kernels",
+    "Circuit model",
+]
+
 with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     session_cache = gr.State(_fresh_cache()) # type: ignore
-    gr.Image(
-        value="logo_long1.png",
-        show_label=False,
-        type="filepath",
-        buttons=[],  # no download/share/fullscreen buttons
-        elem_id="logo-img"
-    )
     gr.HTML(
     """
     <style>
@@ -2976,68 +2984,33 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     </style>
     """
     )
-    gr.Markdown("## 🌐 SpatChat: Connectivity Analysis {connect} 🦌🦅🦝")
-    gr.HTML(
-        """
-    <div style="margin-top: -10px; margin-bottom: 15px;">
-      <input type="text" value="https://spatchat.org/browse/?room=connect" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
-      <button onclick="navigator.clipboard.writeText(document.getElementById('shareLink').value)" style="padding: 5px 10px; background-color: #007BFF; color: white; border: none; border-radius: 4px; cursor: pointer;">
-        📋 Copy Share Link
-      </button>
-      <div style="margin-top: 10px; font-size: 14px;"> 
-        <b>Share:</b> 
-        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=connect" target="_blank">🐦 Twitter</a> | 
-        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=connect" target="_blank">📘 Facebook</a> 
-      </div>
-    </div>
-    """
-    )
-    gr.Markdown(
-        """
-        <div style="font-size: 14px;">
-        © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
-        If you use Spatchat in research, please cite:<br>
-        <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>SpatChat: Connectivity Analysis.</i>
-        </div>
-    """
+    spatchat_ui.build_header(
+        gr,
+        "Connectivity Analysis",
+        "Build resistance surfaces and estimate least-cost paths and corridors through conversation.",
+        "connect",
     )
 
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
-            chatbot = gr.Chatbot(
-                label="SpatChat",
-                show_label=False,
-                layout="bubble",
-                buttons=[],
-                value=[
-                    {
-                        "role": "assistant",
-                        "content": "Hi, I'm Spatchat! This room helps you analyze landscape connectivity using a raster surface and optional node locations.\n\nUpload a raster (GeoTIFF) to begin: it should represent habitat suitability, resistance/cost, or conductance across the landscape.\nOptionally add a nodes CSV: these should be the locations you want to connect or evaluate, such as habitat patches, populations, detections, or sites, with longitude/latitude columns."
-                    }
-                ],
-                elem_id="spatchat-chatbot",
-            )
+            chatbot = gr.Chatbot(**spatchat_ui.chatbot_kwargs(gr, _WELCOME_MESSAGE))
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
-            user_input = gr.Textbox(
-                label=None,
-                show_label=False,
-                placeholder="Ask Spatchat...",
-                lines=1,
-                elem_id="spatchat-user-input",
-            )
-
-            # NEW: Separate uploaders for raster and nodes
-            raster_input = gr.File(
-                label="Upload Raster (GeoTIFF .tif/.tiff; required)",
-                file_types=[".tif", ".tiff"],
-                elem_id="spatchat-raster-input",
-            )
-            nodes_input = gr.File(
-                label="Upload Nodes CSV (optional)",
-                file_types=[".csv"],
-                interactive=True,
-                elem_id="spatchat-nodes-input",
-            )
+            with gr.Row(elem_id="spatchat-chips"):
+                nodes_input = gr.UploadButton(
+                    "Upload nodes CSV",
+                    file_types=[".csv"],
+                    elem_id="spatchat-nodes-input",
+                    size="sm",
+                    elem_classes=["spatchat-chip"],
+                    scale=0,
+                    min_width=0,
+                )
+                for _label in _SUGGESTION_CHIPS:
+                    gr.Button(_label, size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0).click(
+                        fn=None, js=spatchat_ui.chip_js(_label)
+                    )
+            # "+" uploads the raster surface (required); nodes are added with the chip above.
+            raster_input, user_input, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".tif", ".tiff"])
             download_btn = gr.DownloadButton(
                 "⭳ Download Results",
                 value=_ensure_placeholder_download(),
@@ -3047,7 +3020,11 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         with gr.Column(scale=0, min_width=14, elem_id="spatchat-splitter"):
             gr.HTML("<div class='spatchat-splitter-handle' onmousedown='return window.spatchatBeginResize ? window.spatchatBeginResize(event) : false;' title='Drag to resize panels'></div>")
         with gr.Column(scale=5, min_width=0, elem_id="spatchat-mapcol"):
-            map_output = gr.HTML(label="Map Preview", value=_render_empty_map(), show_label=False, elem_id="spatchat-map")
+            with gr.Tabs(elem_id="spatchat-tabs"):
+                with gr.Tab("Map", id="map"):
+                    map_output = gr.HTML(label="Map Preview", value=_render_empty_map(), show_label=False, elem_id="spatchat-map")
+
+    spatchat_ui.build_footer(gr, "Wan, H.Y. &amp; Hysen, L. (2025). <i>SpatChat: Connectivity Analysis.</i>")
 
     # Queue
     _prune_stale_sessions()
@@ -3056,17 +3033,18 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     demo.unload(_cleanup_current_browser_session)
 
     # Wire events
-    raster_input.change(
+    raster_input.upload(
         fn=handle_raster_upload,
         inputs=[raster_input, session_cache],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache]
     )
-    nodes_input.change(
+    nodes_input.upload(
         fn=handle_nodes_upload,
         inputs=[nodes_input, chatbot, session_cache],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache]
     )
-    chat_submit = user_input.submit(
+    chat_submit = gr.on(
+        triggers=[user_input.submit, send_btn.click],
         fn=metered_chat(room="connect", message_index=1, deny=_chat_denied)(handle_chat),
         inputs=[chatbot, user_input, session_cache],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache],
@@ -3089,7 +3067,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
 def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
         "share": False,
-        "head": _SPLITTER_HEAD,
+        "head": _SPLITTER_HEAD + spatchat_ui.HEAD,
         "server_name": os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         "server_port": int(os.environ.get("PORT", 7860))
     }
