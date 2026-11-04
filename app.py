@@ -2040,7 +2040,16 @@ def handle_nodes_upload(file, chat_history, cache):
             "Nodes CSV uploaded. Please select X and Y columns, optionally select a node ID, "
             "and enter the original coordinate system below. "
             "For WGS84 UTM zone 17 latitude band M, enter 'UTM 17M' or 'EPSG:32717'."})
-    return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache
+    # A successfully prepared WGS84 nodes dataframe is now ready to draw.
+    # Refresh the Folium map so build_preview_from_cache() can fit its bounds
+    # to those points. For unknown/projected CRS, wait for confirmation.
+    ready_nodes = cache.get("nodes_df")
+    if isinstance(ready_nodes, pd.DataFrame) and not ready_nodes.empty:
+        map_update = gr.update(value=_build_preview_map(cache))
+        print("[CONNECT NODES] Map fitted to uploaded point locations", flush=True)
+    else:
+        map_update = gr.skip()
+    return chat_history, map_update, gr.skip(), _status_clear_update(), cache
 
 
 def _nodes_upload_ui(file, chat_history, cache):
