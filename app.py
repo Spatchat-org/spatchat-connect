@@ -581,7 +581,7 @@ def _clear_outputs_dir(output_dir: str, *, preserve: Optional[Tuple[str, ...]] =
             print(f"Warning: failed to remove output artifact '{target}': {exc}")
 
 
-def _clear_uploads_dir(upload_dir: str, *, keep: Optional[str] = None) -> None:
+def _clear_uploads_dir(upload_dir: str, *, keep: Optional[Union[str, set[str]]] = None) -> None:
     """Remove previously uploaded artifacts from an uploads directory."""
     try:
         entries = list(os.listdir(upload_dir))
@@ -590,7 +590,7 @@ def _clear_uploads_dir(upload_dir: str, *, keep: Optional[str] = None) -> None:
         return
 
     for name in entries:
-        if keep and name == keep:
+        if keep and name in ({keep} if isinstance(keep, str) else keep):
             continue
         target = os.path.join(upload_dir, name)
         try:
@@ -1794,7 +1794,11 @@ def handle_raster_upload(file, cache):
     dst = os.path.join(upload_dir, dst_name)
     try:
         _clear_outputs_dir(output_dir)
-        _clear_uploads_dir(upload_dir, keep=dst_name)
+        # Keep both the new raster and a nodes CSV already uploaded in this session.
+        keep_names = {dst_name}
+        if existing_nodes_csv and os.path.dirname(os.path.abspath(existing_nodes_csv)) == os.path.abspath(upload_dir):
+            keep_names.add(os.path.basename(existing_nodes_csv))
+        _clear_uploads_dir(upload_dir, keep=keep_names)
         need_copy = True
         try:
             if os.path.exists(dst) and os.path.samefile(src, dst):
@@ -2055,6 +2059,24 @@ def _nodes_upload_ui(file, chat_history, cache):
                       value=id_suggest or "(Generate automatically)", visible=pending),
             gr.update(value="", visible=pending))
 
+
+
+def _composer_upload_dispatch(file, chat_history, cache):
+    """Route the single + uploader to either nodes CSV or raster GeoTIFF."""
+    path = _file_to_path(file)
+    suffix = os.path.splitext(str(path or ""))[1].lower()
+    if suffix == ".csv":
+        # The node handler also updates the coordinate-confirmation controls.
+        return _nodes_upload_ui(file, chat_history, cache)
+    if suffix in (".tif", ".tiff"):
+        # Preserve five node-coordinate UI components when uploading a raster.
+        return (*handle_raster_upload(file, cache),
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+    history = list(chat_history or [])
+    history.append({"role": "assistant", "content":
+                    "Please upload a nodes CSV (.csv) or a GeoTIFF raster (.tif/.tiff)."})
+    return (history, gr.skip(), gr.skip(), _status_clear_update(), cache,
+            gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
 
 def _confirm_nodes_ui(x_col, y_col, id_col, crs_text, chat_history, cache):
     chat_history = list(chat_history or [])
@@ -3050,8 +3072,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                     gr.Button(_label, size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0).click(
                         fn=None, js=spatchat_ui.chip_js(_label)
                     )
-            # "+" uploads the raster surface (required); nodes are added with the chip above.
-            raster_input, user_input, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".tif", ".tiff"])
+            # The + composer accepts GeoTIFF rasters and nodes CSV files.
+            raster_input, user_input, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".tif", ".tiff", ".csv"])
             with gr.Column(visible=False, elem_id="spatchat-node-crs-panel") as node_crs_panel:
                 gr.Markdown("**Configure Node Coordinates**\n\nSelect columns and specify the original CRS.")
                 nodes_x_dropdown = gr.Dropdown(label="X coordinate (Easting / Longitude)", choices=[], interactive=True)
@@ -3082,9 +3104,11 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
 
     # Wire events
     raster_input.upload(
-        fn=handle_raster_upload,
-        inputs=[raster_input, session_cache],
-        outputs=[chatbot, map_output, download_btn, status_output, session_cache]
+        fn=_composer_upload_dispatch,
+        inputs=[raster_input, chatbot, session_cache],
+        outputs=[chatbot, map_output, download_btn, status_output, session_cache,
+                 node_crs_panel, nodes_x_dropdown, nodes_y_dropdown,
+                 nodes_id_dropdown, nodes_crs_input]
     )
     nodes_input.upload(
         fn=_nodes_upload_ui,
