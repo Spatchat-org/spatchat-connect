@@ -138,9 +138,11 @@ def _fresh_cache() -> dict:
         "out_of_bounds_node_ids": [],
     }
 
-SESSIONS_ROOT = "sessions"
+# Session files must never depend on a callback's process working directory.
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+SESSIONS_ROOT = os.path.join(APP_ROOT, "sessions")
 os.makedirs(SESSIONS_ROOT, exist_ok=True)
-GLOBAL_OUTPUT_DIR = "outputs"
+GLOBAL_OUTPUT_DIR = os.path.join(APP_ROOT, "outputs")
 os.makedirs(GLOBAL_OUTPUT_DIR, exist_ok=True)
 _GRADIO_SESSION_MAP: dict[str, str] = {}
 
@@ -166,10 +168,10 @@ def _register_gradio_session(session_id: Optional[str]) -> None:
     if request_hash:
         previous_sid = _GRADIO_SESSION_MAP.get(request_hash)
         _GRADIO_SESSION_MAP[request_hash] = sid
-        # Browser refresh can rebind the same session hash to a new session id.
-        # Clean the old workspace immediately so disk usage does not accumulate.
+        # Never delete a previous workspace here: a delayed callback can still
+        # be using its uploaded raster. The periodic TTL pruner handles cleanup.
         if previous_sid and previous_sid != sid:
-            _cleanup_session_workspace(previous_sid)
+            print("[CONNECT SESSION] Rebinding Gradio request; preserving prior workspace", flush=True)
 
 
 def _cleanup_session_workspace(session_id: Optional[str]) -> None:
@@ -189,9 +191,9 @@ def _cleanup_current_browser_session() -> None:
     request_hash = _current_gradio_session_hash()
     if not request_hash:
         return
-    sid = _GRADIO_SESSION_MAP.pop(request_hash, None)
-    if sid:
-        _cleanup_session_workspace(sid)
+    # Closing/reloading a tab can race with queued upload/conversion work.
+    # Drop only the request mapping; the TTL pruner removes the directory later.
+    _GRADIO_SESSION_MAP.pop(request_hash, None)
 
 
 def _prune_stale_sessions(max_age_seconds: int = 60 * 60 * 12) -> None:
@@ -388,8 +390,82 @@ def _normalize_cached_nodes_df(cache: dict) -> None:
     cache["nodes_df"] = df
 
 
+def _connect_raster_manifest_path(session_root: str) -> str:
+    return os.path.join(session_root, "_uploaded_raster.json")
+
+
+def _persist_connect_raster(cache: dict) -> None:
+    """Record the current raster in its own session, independent of gr.State."""
+    path = cache.get("raster_path")
+    root = cache.get("session_root")
+    if not path or not root or not os.path.isfile(path):
+        return
+    # Store only paths within this analysis session; never adopt other users' files.
+    if os.path.commonpath([os.path.realpath(root), os.path.realpath(path)]) != os.path.realpath(root):
+        return
+    info = {
+        "raster_path": os.path.abspath(path),
+        "raster_name": os.path.basename(path),
+        "awaiting_surface_type": bool(cache.get("awaiting_surface_type")),
+        "surface_type": cache.get("surface_type"),
+    }
+    manifest = _connect_raster_manifest_path(root)
+    tmp = manifest + "." + uuid.uuid4().hex + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump(info, fp)
+        os.replace(tmp, manifest)
+        print("[CONNECT RASTER] Saved stable raster reference", flush=True)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _restore_connect_raster(cache: dict) -> bool:
+    """Rehydrate the raster path when a Gradio callback supplies stale cache."""
+    path = cache.get("raster_path")
+    if path and os.path.isfile(path):
+        return True
+    root = cache["session_root"]
+    manifest = _connect_raster_manifest_path(root)
+    try:
+        with open(manifest, "r", encoding="utf-8") as fp:
+            info = json.load(fp)
+        candidate = info.get("raster_path")
+        if not isinstance(candidate, str) or not os.path.isfile(candidate):
+            return False
+        if os.path.commonpath([os.path.realpath(root), os.path.realpath(candidate)]) != os.path.realpath(root):
+            return False
+        cache["raster_path"] = candidate
+        session_info = cache.setdefault("session_info", {})
+        if not isinstance(session_info, dict):
+            session_info = {}
+            cache["session_info"] = session_info
+        session_info["raster_path"] = candidate
+        session_info["raster_name"] = info.get("raster_name") or os.path.basename(candidate)
+        if not cache.get("surface_type") and info.get("surface_type"):
+            cache["surface_type"] = info["surface_type"]
+        if cache.get("surface_type"):
+            cache["awaiting_surface_type"] = False
+        else:
+            cache["awaiting_surface_type"] = bool(info.get("awaiting_surface_type", True))
+        if not cache.get("raster_width"):
+            _refresh_raster_metadata(cache)
+        print("[CONNECT RASTER] Restored raster reference from active analysis session", flush=True)
+        return True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def _ensure_session_workspace(cache: dict) -> dict:
-    session_id = str(cache.get("session_id") or uuid.uuid4().hex)
+    incoming = str(cache.get("session_id") or "").strip()
+    request_hash = _current_gradio_session_hash()
+    mapped = _GRADIO_SESSION_MAP.get(request_hash) if request_hash else None
+    # A previously resolved scalar session ID (bound by Gradio callbacks) takes
+    # priority. A missing ID can reuse the same browser tab's registered session.
+    session_id = incoming if re.fullmatch(r"[0-9a-f]{32}", incoming) else (
+        mapped if mapped and re.fullmatch(r"[0-9a-f]{32}", mapped) else uuid.uuid4().hex
+    )
     session_root = os.path.join(SESSIONS_ROOT, session_id)
     upload_dir = os.path.join(session_root, "uploads")
     output_dir = os.path.join(session_root, "outputs")
@@ -409,6 +485,7 @@ def _ensure_session_workspace(cache: dict) -> dict:
         session_info = {}
         cache["session_info"] = session_info
     session_info.setdefault("session_id", session_id)
+    _restore_connect_raster(cache)
     return cache
 
 
@@ -1791,7 +1868,11 @@ def handle_raster_upload(file, cache):
     output_dir = cache["output_dir"]
     converted_dir = cache["converted_dir"]
     dst_name = os.path.basename(src)
-    dst = os.path.join(upload_dir, dst_name)
+    # Do not place the source GeoTIFF in uploads/, which is cleared when a new
+    # file arrives. Keep one durable raster source per analysis workspace.
+    raster_dir = os.path.join(cache["session_root"], "source_rasters")
+    os.makedirs(raster_dir, exist_ok=True)
+    dst = os.path.join(raster_dir, dst_name)
     try:
         _clear_outputs_dir(output_dir)
         # Keep both the new raster and a nodes CSV already uploaded in this session.
@@ -1808,9 +1889,10 @@ def handle_raster_upload(file, cache):
             need_copy = True
         if need_copy:
             shutil.copy(src, dst)
-        cache["raster_path"] = dst
+        cache["raster_path"] = os.path.abspath(dst)
         cache["surface_type"] = None
         cache["awaiting_surface_type"] = True
+        _persist_connect_raster(cache)
         cache["awaiting_conversion_choice"] = False
         cache["last_upload_kind"] = "raster"
         cache["analysis_cost_tif"] = None
@@ -2113,6 +2195,51 @@ def _confirm_nodes_ui(x_col, y_col, id_col, crs_text, chat_history, cache):
         return chat_history, gr.skip(), gr.skip(), _status_clear_update(), cache, gr.update(visible=True)
 
 
+def _connect_with_session(cache, sid):
+    updated = dict(cache or _fresh_cache())
+    explicit = str(sid or "").strip()
+    if re.fullmatch(r"[0-9a-f]{32}", explicit):
+        if updated.get("session_id") not in (None, "", explicit):
+            # Reject metadata copied from a different analysis session.
+            updated = _fresh_cache()
+        updated["session_id"] = explicit
+    return _ensure_session_workspace(updated)
+
+
+def _composer_upload_with_session(file, chat_history, cache, sid):
+    bound = _connect_with_session(cache, sid)
+    result = _composer_upload_dispatch(file, chat_history, bound)
+    return (*result, result[4]["session_id"])
+
+
+def _nodes_upload_with_session(file, chat_history, cache, sid):
+    bound = _connect_with_session(cache, sid)
+    result = _nodes_upload_ui(file, chat_history, bound)
+    return (*result, result[4]["session_id"])
+
+
+def _confirm_nodes_with_session(x_col, y_col, id_col, crs_text, chat_history, cache, sid):
+    bound = _connect_with_session(cache, sid)
+    result = _confirm_nodes_ui(x_col, y_col, id_col, crs_text, chat_history, bound)
+    return (*result, result[4]["session_id"])
+
+
+def _chat_denied_with_session(markdown, chat_history, user_message, cache, sid):
+    result = _chat_denied(markdown, chat_history, user_message, cache)
+    return (*result, sid)
+
+
+def _handle_chat_with_session(chat_history, user_message, cache, sid):
+    bound = _connect_with_session(cache, sid)
+    resolved_sid = bound["session_id"]
+    path = bound.get("raster_path")
+    print("[CONNECT CHAT] sid={} raster_present={}".format(
+        resolved_sid[:8], bool(path and os.path.isfile(path))), flush=True)
+    for result in handle_chat(chat_history, user_message, bound):
+        # gr.skip() is represented as a dict, not as the app session state.
+        yield (*result, resolved_sid)
+
+
 # --------------------------------------------------------------------------------------
 # Chat handler (placeholder)
 # --------------------------------------------------------------------------------------
@@ -2161,6 +2288,7 @@ def handle_chat(chat_history, user_message, cache):
         if surface_choice:
             cache["surface_type"] = surface_choice
             cache["awaiting_surface_type"] = False
+            _persist_connect_raster(cache)
             cache["analysis_cost_tif"] = None
             cache["conversion_target"] = None
             cache["conversion_path"] = None
@@ -2527,6 +2655,7 @@ _SUGGESTION_CHIPS = [
 
 with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     session_cache = gr.State(_fresh_cache()) # type: ignore
+    analysis_session_id = gr.State(None)  # Explicit session identity, shared by all callbacks.
     gr.HTML(
     """
     <style>
@@ -3113,33 +3242,33 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
 
     # Wire events
     raster_input.upload(
-        fn=_composer_upload_dispatch,
-        inputs=[raster_input, chatbot, session_cache],
+        fn=_composer_upload_with_session,
+        inputs=[raster_input, chatbot, session_cache, analysis_session_id],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache,
                  node_crs_panel, nodes_x_dropdown, nodes_y_dropdown,
-                 nodes_id_dropdown, nodes_crs_input]
+                 nodes_id_dropdown, nodes_crs_input, analysis_session_id]
     )
     nodes_input.upload(
-        fn=_nodes_upload_ui,
-        inputs=[nodes_input, chatbot, session_cache],
+        fn=_nodes_upload_with_session,
+        inputs=[nodes_input, chatbot, session_cache, analysis_session_id],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache,
-                 node_crs_panel, nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input],
+                 node_crs_panel, nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input, analysis_session_id],
         queue=False,
         show_progress="hidden",
     )
     nodes_confirm_btn.click(
-        fn=_confirm_nodes_ui,
-        inputs=[nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input, chatbot, session_cache],
-        outputs=[chatbot, map_output, download_btn, status_output, session_cache, node_crs_panel],
+        fn=_confirm_nodes_with_session,
+        inputs=[nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input, chatbot, session_cache, analysis_session_id],
+        outputs=[chatbot, map_output, download_btn, status_output, session_cache, node_crs_panel, analysis_session_id],
     )
     chat_submit = gr.on(
         triggers=[user_input.submit, send_btn.click],
-        fn=metered_chat(room="connect", message_index=1, deny=_chat_denied)(handle_chat),
-        inputs=[chatbot, user_input, session_cache],
-        outputs=[chatbot, map_output, download_btn, status_output, session_cache],
+        fn=metered_chat(room="connect", message_index=1, deny=_chat_denied_with_session)(_handle_chat_with_session),
+        inputs=[chatbot, user_input, session_cache, analysis_session_id],
+        outputs=[chatbot, map_output, download_btn, status_output, session_cache, analysis_session_id],
         show_progress="hidden",
         js="""
-        (chatHistory, message, cache) => {
+        (chatHistory, message, cache, sid) => {
             const text = message ?? "";
             setTimeout(() => {
                 const input = document.querySelector('#spatchat-user-input textarea, #spatchat-user-input input');
@@ -3148,7 +3277,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                 }
             }, 0);
-            return [chatHistory, text, cache];
+            return [chatHistory, text, cache, sid];
         }
         """,
     )
