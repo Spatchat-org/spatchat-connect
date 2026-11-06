@@ -14,3 +14,6 @@ venv/
 # Temporary local work files
 .tmp_*
 *.log
+
+# generated on demand by the app (binary files are rejected by Hugging Face)
+sample_data/*.tif

@@ -1861,6 +1861,27 @@ _SAMPLE_RASTER_PATH = os.path.join(_SAMPLE_DIR, "demo_cost_surface.tif")
 _SAMPLE_NODES_PATH = os.path.join(_SAMPLE_DIR, "demo_nodes.csv")
 
 
+def _ensure_sample_files() -> None:
+    """The sample raster is generated on first use: Hugging Face rejects binary files in the repo."""
+    if os.path.exists(_SAMPLE_RASTER_PATH) and os.path.exists(_SAMPLE_NODES_PATH):
+        return
+    from pathlib import Path
+    from generate_sample_data import generate
+
+    generate(Path(_SAMPLE_DIR), raster_name=os.path.basename(_SAMPLE_RASTER_PATH),
+             nodes_name=os.path.basename(_SAMPLE_NODES_PATH), seed=11)
+
+
+def _sample_raster_upload(chat_history, cache, sid):
+    _ensure_sample_files()
+    return _composer_upload_with_session(_SAMPLE_RASTER_PATH, chat_history, cache, sid)
+
+
+def _sample_nodes_upload(chat_history, cache, sid):
+    _ensure_sample_files()
+    return _nodes_upload_with_session(_SAMPLE_NODES_PATH, chat_history, cache, sid)
+
+
 def handle_raster_upload(file, cache):
     """Cache raster on disk, read bounds, and refresh preview map."""
     cache = _ensure_session_workspace(dict(cache or _fresh_cache()))
@@ -3283,14 +3304,14 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                  nodes_id_dropdown, nodes_crs_input, analysis_session_id]
     ).then(_connect_views, inputs=session_cache, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
     sample_btn.click(
-        fn=_composer_upload_with_session,
-        inputs=[gr.State(_SAMPLE_RASTER_PATH), chatbot, session_cache, analysis_session_id],
+        fn=_sample_raster_upload,
+        inputs=[chatbot, session_cache, analysis_session_id],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache,
                  node_crs_panel, nodes_x_dropdown, nodes_y_dropdown,
                  nodes_id_dropdown, nodes_crs_input, analysis_session_id]
     ).then(
-        fn=_nodes_upload_with_session,
-        inputs=[gr.State(_SAMPLE_NODES_PATH), chatbot, session_cache, analysis_session_id],
+        fn=_sample_nodes_upload,
+        inputs=[chatbot, session_cache, analysis_session_id],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache,
                  node_crs_panel, nodes_x_dropdown, nodes_y_dropdown,
                  nodes_id_dropdown, nodes_crs_input, analysis_session_id],
