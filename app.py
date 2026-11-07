@@ -295,6 +295,17 @@ def _file_to_path(file: Union[str, os.PathLike, dict, object]) -> Optional[str]:
     return None
 
 
+_EMPTY_MAP_HINT = """
+<div class="spatchat-map-empty-hint">
+  <div class="spatchat-map-empty-hint-card">
+    <div class="spatchat-map-empty-hint-icon">&#128205;</div>
+    <div>Drop a surface GeoTIFF here, or click + to start</div>
+    <div class="spatchat-map-empty-hint-sub">Then add a nodes CSV &middot; or click &ldquo;Try sample data&rdquo;</div>
+  </div>
+</div>
+"""
+
+
 def _render_empty_map(msg: Optional[str] = None) -> str:
     m = folium.Map(location=[20, 0], zoom_start=2, control_scale=True, tiles=None)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -313,7 +324,7 @@ def _render_empty_map(msg: Optional[str] = None) -> str:
         folium.map.Marker([0, 0], popup=msg).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     _add_empty_map_style_patch(m)
-    return m._repr_html_()
+    return _EMPTY_MAP_HINT + m._repr_html_()
 
 
 def _add_empty_map_style_patch(m: folium.Map) -> None:
@@ -3265,6 +3276,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                     )
             # The + composer accepts GeoTIFF rasters and nodes CSV files.
             raster_input, user_input, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".tif", ".tiff", ".csv"])
+            spatchat_ui.drop_hint(gr, "a surface GeoTIFF or a nodes CSV")
             with gr.Column(visible=False, elem_id="spatchat-node-crs-panel") as node_crs_panel:
                 gr.Markdown("**Configure Node Coordinates**\n\nSelect columns and specify the original CRS.")
                 nodes_x_dropdown = gr.Dropdown(label="X coordinate (Easting / Longitude)", choices=[], interactive=True)
