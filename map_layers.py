@@ -42,16 +42,16 @@ from map_utils import fit_map_to_bounds
 # ---------------------------------------------------------------------------
 
 def _base_map(center_lat: float, center_lon: float, control_scale: bool = True, zoom: int = 9) -> folium.Map:
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=control_scale)
-    folium.TileLayer("OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB positron", attr="CartoDB").add_to(m)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=control_scale, tiles=None)
+    folium.TileLayer("OpenStreetMap", show=False).add_to(m)
+    folium.TileLayer("CartoDB positron", attr="CartoDB", show=False).add_to(m)
     folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap", name="Topographic"
+        attr="OpenTopoMap", name="Topographic", show=False
     ).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri", name="Satellite"
+        attr="Esri", name="Satellite", show=True
     ).add_to(m)
     return m
 

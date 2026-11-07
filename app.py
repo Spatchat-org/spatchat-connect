@@ -310,17 +310,19 @@ _EMPTY_MAP_HINT = """
 
 def _render_empty_map(msg: Optional[str] = None) -> str:
     m = folium.Map(location=[20, 0], zoom_start=2, control_scale=True, tiles=None)
-    folium.TileLayer("OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB positron", attr="CartoDB").add_to(m)
+    folium.TileLayer("OpenStreetMap", show=False).add_to(m)
+    folium.TileLayer("CartoDB positron", attr="CartoDB", show=False).add_to(m)
     folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         attr="OpenTopoMap",
         name="Topographic",
+        show=False,
     ).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri",
         name="Satellite",
+        show=True,
     ).add_to(m)
     if msg:
         folium.map.Marker([0, 0], popup=msg).add_to(m)
