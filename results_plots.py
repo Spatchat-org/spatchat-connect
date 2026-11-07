@@ -65,7 +65,7 @@ def _plot_table(path: str, dest_dir: str) -> list:
         if len(vals) < 2:
             continue
         fig, ax = plt.subplots(figsize=(6.5, 4))
-        ax.hist(vals, bins=min(30, max(5, len(vals) // 2)), color="#2563eb", edgecolor="white")
+        ax.hist(vals, bins=min(30, max(5, len(vals) // 2)), color="#f85088", edgecolor="white")
         ax.set_xlabel(str(col))
         ax.set_ylabel("Count")
         ax.set_title(f"{stem.replace('_', ' ')}: {col}")
@@ -86,7 +86,7 @@ def _plot_nodes(nodes_df, dest: str) -> bool:
         return False
     fig, ax = plt.subplots(figsize=(6.5, 5))
     weight = next((c for c in nodes_df.columns if str(c).lower() == "weight"), None)
-    sc = ax.scatter(nodes_df[lon], nodes_df[lat], c=nodes_df[weight] if weight else "#2563eb", s=70,
+    sc = ax.scatter(nodes_df[lon], nodes_df[lat], c=nodes_df[weight] if weight else "#f85088", s=70,
                     cmap="viridis", edgecolor="white")
     if weight:
         fig.colorbar(sc, ax=ax, shrink=0.8, label="weight")

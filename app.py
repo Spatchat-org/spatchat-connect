@@ -13,6 +13,7 @@ from typing import Optional, Tuple, Union
 import inspect, gradio as gr
 import spatchat_ui
 import spatchat_files as sfiles
+import spatchat_layout
 from results_plots import build_figures
 import pandas as pd
 import re
@@ -3365,7 +3366,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
             with gr.Tabs(elem_id="spatchat-tabs"):
                 with gr.Tab("Map", id="map"):
                     map_output = gr.HTML(label="Map Preview", value=_render_empty_map(), show_label=False, elem_id="spatchat-map")
-                gallery, gallery_empty = spatchat_ui.plots_tab(gr, "Plots", _EMPTY_RESULT_PLOTS_HTML)
+                gallery, gallery_empty = spatchat_layout.plots_tab(gr, _EMPTY_RESULT_PLOTS_HTML)
                 files_panel = sfiles.build(gr)
 
     spatchat_ui.build_footer(gr, "Wan, H.Y. &amp; Hysen, L. (2025). <i>SpatChat: Connectivity Analysis.</i>")
