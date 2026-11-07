@@ -3276,7 +3276,6 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                     )
             # The + composer accepts GeoTIFF rasters and nodes CSV files.
             raster_input, user_input, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".tif", ".tiff", ".csv"])
-            spatchat_ui.drop_hint(gr, "a surface GeoTIFF or a nodes CSV")
             with gr.Column(visible=False, elem_id="spatchat-node-crs-panel") as node_crs_panel:
                 gr.Markdown("**Configure Node Coordinates**\n\nSelect columns and specify the original CRS.")
                 nodes_x_dropdown = gr.Dropdown(label="X coordinate (Easting / Longitude)", choices=[], interactive=True)
