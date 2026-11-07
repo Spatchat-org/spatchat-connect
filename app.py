@@ -12,6 +12,7 @@ from typing import Optional, Tuple, Union
 
 import inspect, gradio as gr
 import spatchat_ui
+import spatchat_files as sfiles
 from results_plots import build_figures
 import pandas as pd
 import re
@@ -1852,7 +1853,7 @@ _EMPTY_RESULT_PLOTS_HTML = spatchat_ui.empty_state_html(
 )
 
 
-def _connect_views(cache):
+def _connect_views(cache, open_nodes=False):
     """Datasheet (nodes table) and Plots (nodes + result rasters/tables) for this session."""
     nodes = None
     paths = []
@@ -1862,9 +1863,75 @@ def _connect_views(cache):
             paths = build_figures(cache)
     except Exception as exc:
         print("[connect] views refresh failed:", exc)
-    sheet_up, sheet_empty_up = spatchat_ui.datasheet_updates(gr, nodes, _EMPTY_NODES_HTML)
     gal_up, gal_empty_up = spatchat_ui.gallery_updates(gr, paths, _EMPTY_RESULT_PLOTS_HTML)
-    return sheet_up, sheet_empty_up, gal_up, gal_empty_up
+    uploaded, produced = _files_entries(cache)
+    first_csv = next((e["path"] for e in uploaded if e["path"].lower().endswith(".csv")), None)
+    return (gal_up, gal_empty_up,
+            *files_panel.updates(gr, uploaded, produced, preview_path=first_csv if open_nodes else None))
+
+
+def _connect_views_open(cache):
+    """Same as _connect_views, but also opens the uploaded nodes CSV in the Files preview (after an upload)."""
+    return _connect_views(cache, open_nodes=True)
+
+
+def _files_entries(cache):
+    """(uploaded, produced) file entries for the Files tab."""
+    if not isinstance(cache, dict) or not cache.get("session_root"):
+        return [], []
+    root = cache["session_root"]
+    active = os.path.abspath(cache.get("raster_path") or "")
+
+    def up_note(path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".tif", ".tiff"):
+            return "Surface raster" + (" (active)" if os.path.abspath(path) == active else "")
+        return "Nodes" if ext == ".csv" else ""
+
+    def out_note(path):
+        ext = os.path.splitext(path)[1].lower()
+        return {".tif": "Raster", ".tiff": "Raster", ".csv": "Table", ".zip": "Results bundle",
+                ".geojsonl": "Paths", ".json": "Summary"}.get(ext, "")
+
+    uploaded = (sfiles.scan(os.path.join(root, "source_rasters"), sfiles.UPLOADED, note_for=up_note)
+                + sfiles.scan(cache.get("upload_dir"), sfiles.UPLOADED, note_for=up_note))
+    produced = sfiles.scan(cache.get("output_dir"), sfiles.PRODUCED,
+                           skip_dirs=("_plots", "_metric_grid_cache", "download_bundle"), note_for=out_note)
+    return uploaded, produced
+
+
+def _files_remove(rows, paths, chat_history, cache, sid):
+    """Delete the ticked files and reset whatever the room had loaded from them."""
+    cache = _connect_with_session(cache, sid)
+    chat = list(chat_history or [])
+    selected = files_panel.ticked(rows, paths)
+    removed, problems = sfiles.remove_paths(selected, [cache["session_root"]])
+    gone = {os.path.abspath(p) for p in removed}
+    upload_dir = os.path.abspath(cache.get("upload_dir") or "")
+
+    nodes_gone = any(os.path.dirname(p) == upload_dir and p.lower().endswith(".csv") for p in gone)
+    raster_gone = os.path.abspath(cache.get("raster_path") or "") in gone
+    if raster_gone:
+        cache = handle_raster_upload(None, cache)[4]
+        _clear_node_dependent_results(cache)
+    if nodes_gone:
+        chat, _, _, _, cache = handle_nodes_upload(None, chat, cache)
+    for key, value in list(cache.items()):  # forget results whose file is gone
+        if isinstance(value, str) and os.path.abspath(value) in gone:
+            cache[key] = None
+    if gone:
+        _mark_results_dirty(cache, clear_bundle_path=True)
+        chat.append({"role": "assistant", "content": sfiles.removal_message(removed)})
+    map_html = _build_preview_map(cache) if gone else gr.skip()
+    return (*files_panel.updates(gr, *_files_entries(cache), message=sfiles.removal_message(removed), problems=problems,
+                                  reset_preview=bool(removed)),
+            chat, map_html, _download_update(cache) if gone else gr.skip(), cache,
+            gr.update(visible=False) if nodes_gone else gr.skip())
+
+
+def _files_download(rows, paths, cache):
+    roots = [cache.get("session_root")] if isinstance(cache, dict) else []
+    return files_panel.download_update(gr, rows, paths, roots)
 
 
 _SAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data")
@@ -3295,8 +3362,8 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
             with gr.Tabs(elem_id="spatchat-tabs"):
                 with gr.Tab("Map", id="map"):
                     map_output = gr.HTML(label="Map Preview", value=_render_empty_map(), show_label=False, elem_id="spatchat-map")
-                sheet, sheet_empty = spatchat_ui.datasheet_tab(gr, "Datasheet", _EMPTY_NODES_HTML)
                 gallery, gallery_empty = spatchat_ui.plots_tab(gr, "Plots", _EMPTY_RESULT_PLOTS_HTML)
+                files_panel = sfiles.build(gr)
 
     spatchat_ui.build_footer(gr, "Wan, H.Y. &amp; Hysen, L. (2025). <i>SpatChat: Connectivity Analysis.</i>")
 
@@ -3306,6 +3373,17 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
     demo.queue(max_size=16)
     demo.unload(_cleanup_current_browser_session)
 
+    VIEW_OUTPUTS = [gallery, gallery_empty, *files_panel.outputs]
+    files_panel.refresh_btn.click(lambda c, sid: _connect_views(_connect_with_session(c, sid)),
+                                  inputs=[session_cache, analysis_session_id], outputs=VIEW_OUTPUTS)
+    files_panel.remove_btn.click(
+        _files_remove,
+        inputs=[*files_panel.selections, chatbot, session_cache, analysis_session_id],
+        outputs=[*files_panel.outputs, chatbot, map_output, download_btn, session_cache, node_crs_panel],
+    ).then(_connect_views, inputs=session_cache, outputs=VIEW_OUTPUTS, show_progress="hidden")
+    files_panel.table.input(_files_download, inputs=[*files_panel.selections, session_cache],
+                            outputs=files_panel.download_btn, show_progress="hidden")
+
     # Wire events
     raster_input.upload(
         fn=_composer_upload_with_session,
@@ -3313,7 +3391,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
         outputs=[chatbot, map_output, download_btn, status_output, session_cache,
                  node_crs_panel, nodes_x_dropdown, nodes_y_dropdown,
                  nodes_id_dropdown, nodes_crs_input, analysis_session_id]
-    ).then(_connect_views, inputs=session_cache, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
+    ).then(_connect_views_open, inputs=session_cache, outputs=VIEW_OUTPUTS, show_progress="hidden")
     sample_btn.click(
         fn=_sample_raster_upload,
         inputs=[chatbot, session_cache, analysis_session_id],
@@ -3327,7 +3405,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                  node_crs_panel, nodes_x_dropdown, nodes_y_dropdown,
                  nodes_id_dropdown, nodes_crs_input, analysis_session_id],
         show_progress="hidden",
-    ).then(_connect_views, inputs=session_cache, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
+    ).then(_connect_views_open, inputs=session_cache, outputs=VIEW_OUTPUTS, show_progress="hidden")
     nodes_input.upload(
         fn=_nodes_upload_with_session,
         inputs=[nodes_input, chatbot, session_cache, analysis_session_id],
@@ -3335,12 +3413,12 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
                  node_crs_panel, nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input, analysis_session_id],
         queue=False,
         show_progress="hidden",
-    ).then(_connect_views, inputs=session_cache, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
+    ).then(_connect_views_open, inputs=session_cache, outputs=VIEW_OUTPUTS, show_progress="hidden")
     nodes_confirm_btn.click(
         fn=_confirm_nodes_with_session,
         inputs=[nodes_x_dropdown, nodes_y_dropdown, nodes_id_dropdown, nodes_crs_input, chatbot, session_cache, analysis_session_id],
         outputs=[chatbot, map_output, download_btn, status_output, session_cache, node_crs_panel, analysis_session_id],
-    ).then(_connect_views, inputs=session_cache, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
+    ).then(_connect_views, inputs=session_cache, outputs=VIEW_OUTPUTS, show_progress="hidden")
     chat_submit = gr.on(
         triggers=[user_input.submit, send_btn.click],
         fn=metered_chat(room="connect", message_index=1, deny=_chat_denied_with_session)(_handle_chat_with_session),
@@ -3360,7 +3438,7 @@ with gr.Blocks(title="SpatChat: Connectivity Analysis") as demo:
             return [chatHistory, text, cache, sid];
         }
         """,
-    ).then(_connect_views, inputs=session_cache, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
+    ).then(_connect_views, inputs=session_cache, outputs=VIEW_OUTPUTS, show_progress="hidden")
 
 def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
