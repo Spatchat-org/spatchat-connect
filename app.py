@@ -1897,6 +1897,9 @@ def _files_entries(cache):
                 + sfiles.scan(cache.get("upload_dir"), sfiles.UPLOADED, note_for=up_note))
     produced = sfiles.scan(cache.get("output_dir"), sfiles.PRODUCED,
                            skip_dirs=("_plots", "_metric_grid_cache", "download_bundle"), note_for=out_note)
+    inputs = [os.path.basename(cache.get("raster_path") or "")] + \
+             [e["name"] for e in uploaded if e["name"].lower().endswith(".csv")][:1]
+    sfiles.stamp_sources(produced, os.path.join(root, ".provenance.json"), " + ".join(n for n in inputs if n))
     return uploaded, produced
 
 
