@@ -123,7 +123,7 @@ class UnifiedLLM:
             )
 
         tries, delay, last = 3, 2.5, None
-        for _ in range(tries):
+        for attempt in range(tries):
             try:
                 if self.hf_chat_enabled and hasattr(self.hf, "chat_completion"):
                     resp = self.hf.chat_completion(
@@ -152,7 +152,11 @@ class UnifiedLLM:
                         stream=False,
                         return_full_text=False,
                     )
-                last = e; time.sleep(delay); delay *= 1.8
+                last = e
+                if attempt == tries - 1:
+                    break
+                time.sleep(delay)
+                delay *= 1.8
         raise last
 
     @staticmethod
