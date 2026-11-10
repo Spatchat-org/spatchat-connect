@@ -122,9 +122,6 @@ def build_figures(cache: dict) -> list:
             pass
 
     paths = []
-    dest = os.path.join(plots_dir, "nodes.png")
-    if _plot_nodes(nodes_df, dest):
-        paths.append(dest)
     for root, dirs, files in os.walk(output_dir):
         dirs[:] = [d for d in dirs if d not in ("converted", "_plots")]
         for fn in sorted(files):
