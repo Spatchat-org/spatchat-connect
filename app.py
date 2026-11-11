@@ -1134,9 +1134,11 @@ def _detect_intents(message: str) -> list[str]:
     ]
     circuit_keywords = [
         "circuitscape", "circuit analysis", "effective resistance", "run circuit", "compute circuit", "circuit-style",
+        "circuit model",
     ]
     graph_keywords = [
         "graph model", "graph theory", "graph analysis", "network model", "network analysis",
+        "graph connectivity", "graph workflow",
     ]
     intents: list[str] = []
     if any(keyword in msg for keyword in lcp_keywords):
@@ -1735,6 +1737,28 @@ def _execute_connectivity_tool_call(tool_call: dict, chat_history, cache):
             yield chat_history, gr.update(value=_build_preview_map(cache)), _download_update(cache), _status_clear_update(), cache
         except Exception as exc:
             chat_history.append({"role": "assistant", "content": _analysis_error_message("Circuit analysis", exc)})
+            yield chat_history, gr.skip(), _download_update(cache), _status_clear_update(), cache
+        return
+
+    if method == "graph":
+        job_id = datetime.now(timezone.utc).strftime("graph_%Y%m%d_%H%M%S")
+
+        def _ensure_lcp(cache, base_job_id):
+            lcp_job_id = f"{base_job_id}_lcp"
+            return run_lcp(cache, output_dir, lcp_job_id, write_session_snapshot)
+
+        try:
+            success, message, _ = yield from _run_with_status(
+                chat_history,
+                cache,
+                "Thinking",
+                lambda: run_graph_model(cache, output_dir, job_id, ensure_lcp=_ensure_lcp),
+            )
+            chat_history.append({"role": "assistant", "content": message})
+            _append_out_of_bounds_analysis_reminder(chat_history, cache, success=success)
+            yield chat_history, gr.update(value=_build_preview_map(cache)), _download_update(cache), _status_clear_update(), cache
+        except Exception as exc:
+            chat_history.append({"role": "assistant", "content": _analysis_error_message("Graph analysis", exc)})
             yield chat_history, gr.skip(), _download_update(cache), _status_clear_update(), cache
         return
 

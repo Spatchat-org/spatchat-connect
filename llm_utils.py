@@ -329,7 +329,7 @@ interpretation in plain language; do not just repeat the completion/status messa
 When the user requests an analysis, prefer to emit a TOOL CALL as a single, raw JSON object with:
   {
     "tool": "connectivity",
-    "method": "<one of: lcp | kernel | circuit>",
+    "method": "<one of: lcp | kernel | circuit | graph>",
     // Optional common parameters:
     "n_jobs": <int>,
     "preview_n": <int>,            // # paths to render in the UI preview
