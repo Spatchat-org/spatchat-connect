@@ -1984,9 +1984,68 @@ def _ensure_sample_files() -> None:
              nodes_name=os.path.basename(_SAMPLE_NODES_PATH), seed=11)
 
 
+def _sample_surface_note(cache: dict, prepared_messages) -> str:
+    """Tell the user exactly what the sample raster is, so they are not asked to guess."""
+    lines = [
+        "**This sample raster is a resistance (cost) surface.**",
+        "Higher values mean the landscape is harder for animals to move through; it is not a suitability or "
+        "conductance layer. " + _SURFACE_ACKS["resistance"],
+    ]
+    try:
+        with rasterio.open(cache["raster_path"]) as src:
+            band = src.read(1, masked=True)
+        lines.append(f"Cell values range from {float(band.min()):.0f} (easiest to cross) to {float(band.max()):.0f} (hardest).")
+    except Exception:
+        pass
+    lines.extend(m for m in (prepared_messages or ()) if m)
+    return " ".join(lines)
+
+
+def _declare_sample_surface(result):
+    """After the sample raster loads, set its type instead of asking the user a question they cannot answer."""
+    out = list(result)
+    cache = out[4]
+    try:
+        cache["surface_type"] = "resistance"
+        cache["awaiting_surface_type"] = False
+        _persist_connect_raster(cache)
+        cache["analysis_cost_tif"] = None
+        cache["conversion_target"] = None
+        cache["conversion_path"] = None
+        cache["conversion_label"] = None
+        cache["preview_rasters"] = {}
+        cache["awaiting_conversion_choice"] = False
+        needs_manual, prepared = _auto_prepare_surface(cache, "resistance")
+        if isinstance(cache.get("session_info"), dict):
+            session = cache["session_info"]
+            session["surface_type"] = "resistance"
+            session["surface_type_set_at"] = datetime.now(timezone.utc).isoformat()
+        note = _sample_surface_note(cache, prepared)
+        history = list(out[0] or [])
+        if history and isinstance(history[-1], dict):
+            last = dict(history[-1])
+            text = str(last.get("content") or "")
+            last["content"] = text.replace(_surface_prompt(), note) if _surface_prompt() in text else f"{text}\n\n{note}"
+            history[-1] = last
+        else:
+            history.append({"role": "assistant", "content": note})
+        out[0] = history
+        out[1] = gr.update(value=_build_preview_map(cache))
+        out[2] = _download_update(cache)
+    except Exception as exc:
+        print("[connect] could not set the sample surface type: " + repr(exc), file=sys.stderr, flush=True)
+        # Leave things as the normal upload flow expects: the user is asked what the raster is.
+        cache["surface_type"] = None
+        cache["awaiting_surface_type"] = True
+        if isinstance(cache.get("session_info"), dict):
+            cache["session_info"]["surface_type"] = None
+    return tuple(out)
+
+
 def _sample_raster_upload(chat_history, cache, sid):
     _ensure_sample_files()
-    return _composer_upload_with_session(_SAMPLE_RASTER_PATH, chat_history, cache, sid)
+    result = _composer_upload_with_session(_SAMPLE_RASTER_PATH, chat_history, cache, sid)
+    return _declare_sample_surface(result)
 
 
 def _sample_nodes_upload(chat_history, cache, sid):
