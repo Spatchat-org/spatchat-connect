@@ -1,6 +1,8 @@
 # app.py
 
 import os
+import sys
+import traceback
 import shutil
 import json
 import time
@@ -1790,6 +1792,7 @@ def _handle_llm_fallback(chat_history, prior_history, user_message, cache):
                 return
             return
         except Exception:
+            print("[connect] LLM stream failed: " + traceback.format_exc(), file=sys.stderr, flush=True)
             if assistant_message is not None and chat_history and chat_history[-1] is assistant_message:
                 chat_history.pop()
             chat_history.append({"role": "assistant", "content": _local_fallback_reply(cache)})
@@ -1801,6 +1804,7 @@ def _handle_llm_fallback(chat_history, prior_history, user_message, cache):
     try:
         tool_call, llm_text = ask_llm(prior_history, user_message, context=_build_llm_context(cache))
     except Exception:
+        print("[connect] LLM call failed: " + traceback.format_exc(), file=sys.stderr, flush=True)
         chat_history.append({"role": "assistant", "content": _local_fallback_reply(cache)})
         yield chat_history, gr.update(value=_build_preview_map(cache)), _download_update(cache), _status_clear_update(), cache
         return
