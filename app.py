@@ -1,6 +1,23 @@
 # app.py
 
 import os
+# Structured logging: the shared module comes from the gateway (skipped when this room runs on its own).
+try:
+    import spatchat_log
+
+    spatchat_log.setup("connect")
+except Exception:
+    pass
+
+import logging
+
+try:
+    from spatchat_log import swallowed as _swallowed
+except Exception:  # shared module not available: still record the problem with plain logging
+
+    def _swallowed(where, level=logging.WARNING):
+        logging.getLogger("spatchat.swallowed").log(level, "ignored error in %s", where, exc_info=True)
+
 import sys
 import traceback
 import shutil
@@ -226,7 +243,7 @@ def _start_session_pruner(interval_seconds: int = 10 * 60, max_age_seconds: int 
             try:
                 _prune_stale_sessions(max_age_seconds=max_age_seconds)
             except Exception:
-                pass
+                _swallowed("connect.app:_loop (_prune_stale_sessions)")
             time.sleep(interval_seconds)
 
     threading.Thread(target=_loop, name="spatchat-session-pruner", daemon=True).start()
@@ -244,7 +261,7 @@ def _ensure_placeholder_download(cache: Optional[dict] = None) -> str:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("No downloadable results yet. Run an analysis first.\n")
         except Exception:
-            pass
+            _swallowed("connect.app:_ensure_placeholder_download (write)")
     return path
 
 # --------------------------------------------------------------------------------------
@@ -835,7 +852,7 @@ def _refresh_results_bundle(cache: dict) -> Optional[str]:
             shutil.copy2(src, dst)
             copied_any = True
         except Exception:
-            pass
+            _swallowed("connect.app:_copy_file (copy2)")
 
     _copy_file(cache.get("conversion_path"))
     _copy_file(cache.get("analysis_cost_tif"))
@@ -867,7 +884,7 @@ def _refresh_results_bundle(cache: dict) -> Optional[str]:
             graph_edges_df.to_csv(edges_csv, index=False)
             copied_any = True
         except Exception:
-            pass
+            _swallowed("connect.app:_refresh_results_bundle (to_csv)")
 
     session_info = cache.get("session_info")
     if isinstance(session_info, dict) and session_info:
@@ -877,7 +894,7 @@ def _refresh_results_bundle(cache: dict) -> Optional[str]:
                 json.dump(session_info, f, indent=2, default=str)
             copied_any = True
         except Exception:
-            pass
+            _swallowed("connect.app:_refresh_results_bundle (dump)")
 
     try:
         repro_paths = _write_repro_scripts(bundle_dir, cache)
@@ -897,7 +914,7 @@ def _refresh_results_bundle(cache: dict) -> Optional[str]:
         if os.path.exists(zip_path):
             os.remove(zip_path)
     except Exception:
-        pass
+        _swallowed("connect.app:_refresh_results_bundle (remove)")
 
     try:
         cache["results_zip_path"] = shutil.make_archive(zip_base, "zip", bundle_dir)

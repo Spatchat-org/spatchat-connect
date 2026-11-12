@@ -1,6 +1,16 @@
 """Graph-theory workflow helpers."""
 from __future__ import annotations
 
+import logging
+
+try:
+    from spatchat_log import swallowed as _swallowed
+except Exception:  # shared module not available: still record the problem with plain logging
+
+    def _swallowed(where, level=logging.WARNING):
+        logging.getLogger("spatchat.swallowed").log(level, "ignored error in %s", where, exc_info=True)
+
+
 import json
 import math
 import os
@@ -126,7 +136,7 @@ def run_graph_model(cache: Cache, output_dir: str, job_id: str, *, ensure_lcp: O
         with open(summary_json, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
     except Exception:
-        pass
+        _swallowed("connect.graph_flow:run_graph_model (dump)")
     cache["graph_metrics_csv"] = metrics_csv
     cache["graph_metrics_df"] = node_metrics
     cache["graph_metric_name"] = selected_metric
